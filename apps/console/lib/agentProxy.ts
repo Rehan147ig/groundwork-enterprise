@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { SignJWT } from "jose";
+import { mintConsoleAssertion } from "@/lib/jwt";
 
 // Shared plumbing for the console's Agent Registry surface. Mirrors the
 // /api/query proxy: the tenant API key and (for mutations) a short-lived
-// console-admin JWT are minted server-side so neither the key nor the
-// minting secret ever reaches the browser.
+// console-admin assertion are minted server-side so neither the key nor
+// the minting secret ever reaches the browser.
 
 export type Agent = {
   id: string;
@@ -62,22 +62,18 @@ export function agentRuntimeEnv() {
   };
 }
 
-// agentHeaders returns the headers a /v1/agents call needs. When the HS
-// secret is set, a console-admin assertion is minted (verified identity
-// path). Without it, the runtime must run with ALLOW_DEMO_IDENTITY=true
-// — the same fallback contract as /api/query.
-export async function agentHeaders(secret: string, apiKey: string): Promise<Record<string, string>> {
+// agentHeaders returns the headers a /v1/agents call needs. A
+// console-admin assertion is minted with RS256 when configured, else
+// HS256 (local/dev). Without any signing key the header is omitted and
+// the runtime must run with ALLOW_DEMO_IDENTITY=true — the same
+// fail-closed contract as /api/query.
+export async function agentHeaders(_secret: string, apiKey: string): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Groundwork-API-Key": apiKey,
   };
-  if (secret) {
-    const token = await new SignJWT({})
-      .setProtectedHeader({ alg: "HS256" })
-      .setSubject("console-admin")
-      .setIssuedAt()
-      .setExpirationTime("10m")
-      .sign(new TextEncoder().encode(secret));
+  const token = await mintConsoleAssertion("console-admin");
+  if (token) {
     headers["X-Groundwork-User-Assertion"] = token;
   }
   return headers;

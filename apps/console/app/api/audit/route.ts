@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 
 // Proxies the runtime's read-only Audit API (GET /v1/audit and
 // /v1/audit/verify) using a server-side API key, so the key never reaches
-// the browser. Falls back to curated demo data when the runtime is
-// unreachable or unconfigured — the console must look alive in a pitch even
-// with a cold backend. The `source` field tells the UI which path it got.
+// the browser. Falls back to curated demo data ONLY when the console is
+// explicitly running in demo mode (GROUNDWORK_DEMO_MODE=true) AND the
+// runtime is unreachable or unconfigured — otherwise a cold backend is a
+// hard 503, never silent synthetic audit entries. The `source` field
+// tells the UI which path it got.
 
 type AuditEntry = {
   trace_id: string;
@@ -47,6 +49,12 @@ export async function GET() {
     }
   }
 
+  if (process.env.GROUNDWORK_DEMO_MODE !== "true") {
+    return NextResponse.json(
+      { source: "error", error: "audit_unavailable" },
+      { status: 503 },
+    );
+  }
   return NextResponse.json({
     source: "demo",
     entries: DEMO_ENTRIES,

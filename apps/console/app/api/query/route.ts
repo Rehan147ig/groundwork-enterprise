@@ -1,19 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SignJWT } from "jose";
 import { QueryResponse, validateConsoleQueryRequest } from "@/lib/contracts";
+import { mintConsoleAssertion } from "@/lib/jwt";
 
 // This proxy is the critical security fix for the console. The runtime's /v1/query is
 // wrapped by requireVerifiedIdentity: it expects a cryptographically signed end-user
-// assertion in X-Groundwork-User-Assertion. So the proxy MINTS a short-lived HS256 JWT
+// assertion in X-Groundwork-User-Assertion. So the proxy MINTS a short-lived assertion
 // whose `sub` is the selected persona, and sends it alongside the tenant API key.
 //
 //   - tenant/region come from the API key (X-Groundwork-API-Key) — never from the body
+//   - the API key is the server-side GROUNDWORK_API_KEY — a client-supplied api_key is
+//     rejected outright (clients must never be able to inject their own key)
 //   - end-user identity comes from the signed JWT — never trusted from a plain header
 //
-// If GROUNDWORK_JWT_HS_SECRET is not set, the proxy falls back to demo mode (sends the
-// subject as body user_id), which only works when the runtime runs with
-// ALLOW_DEMO_IDENTITY=true. The response is tagged with identity_mode so the UI can warn
-// when it's running in the weaker demo path.
+// Signing: RS256 (GROUNDWORK_JWT_RS_PRIVATE_KEY[_FILE]) in production, HS256
+// (GROUNDWORK_JWT_HS_SECRET) for local/dev. When neither is set the proxy fails closed —
+// it only sends a plain body user_id when GROUNDWORK_DEMO_MODE=true explicitly opts in
+// (which additionally requires the runtime to run with ALLOW_DEMO_IDENTITY=true). The
+// response is tagged with identity_mode so the UI can warn when it's running in the
+// weaker demo path.
 
 export async function POST(request: NextRequest) {
   const payload = await request.json().catch(() => null);
@@ -27,16 +31,16 @@ export async function POST(request: NextRequest) {
   }
 
   const runtimeUrl = process.env.QUERY_RUNTIME_URL ?? "http://localhost:8080";
-  const apiKey = payload.api_key ?? process.env.GROUNDWORK_API_KEY ?? "";
+  const apiKey = process.env.GROUNDWORK_API_KEY ?? "";
   if (!apiKey) {
     return NextResponse.json(
-      { error: "No API key. Set GROUNDWORK_API_KEY or pass api_key." },
-      { status: 400 },
+      { error: "No API key configured. Set GROUNDWORK_API_KEY on the server." },
+      { status: 500 },
     );
   }
-  const secret = process.env.GROUNDWORK_JWT_HS_SECRET ?? "";
 
-  // The body the runtime sees. Never include tenant_id/region (resolved from the key).
+  // The body the runtime sees. Never include tenant_id/region (resolved from the key),
+  // and never accept an api_key from the client payload.
   const body: Record<string, unknown> = { question: payload.question };
   if (payload.source_scopes) body.source_scopes = payload.source_scopes;
   if (payload.idk_threshold !== undefined) body.idk_threshold = payload.idk_threshold;
@@ -46,19 +50,20 @@ export async function POST(request: NextRequest) {
     "X-Groundwork-API-Key": apiKey,
   };
 
-  let identityMode: "verified" | "demo" = "demo";
-  if (secret) {
-    const token = await new SignJWT({})
-      .setProtectedHeader({ alg: "HS256" })
-      .setSubject(subject)
-      .setIssuedAt()
-      .setExpirationTime("10m")
-      .sign(new TextEncoder().encode(secret));
+  const token = await mintConsoleAssertion(subject);
+  let identityMode: "verified" | "demo";
+  if (token) {
     headers["X-Groundwork-User-Assertion"] = token;
     identityMode = "verified";
-  } else {
-    // Demo fallback: runtime must run with ALLOW_DEMO_IDENTITY=true for this to resolve.
+  } else if (process.env.GROUNDWORK_DEMO_MODE === "true") {
+    // Explicit demo opt-in only: runtime must run with ALLOW_DEMO_IDENTITY=true.
     body.user_id = subject;
+    identityMode = "demo";
+  } else {
+    return NextResponse.json(
+      { error: "Identity is not configured. Set GROUNDWORK_JWT_RS_PRIVATE_KEY (production) or GROUNDWORK_JWT_HS_SECRET (local), or GROUNDWORK_DEMO_MODE=true for demo only." },
+      { status: 503 },
+    );
   }
 
   let response: Response;

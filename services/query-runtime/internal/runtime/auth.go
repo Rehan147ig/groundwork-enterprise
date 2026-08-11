@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,17 +73,19 @@ type APIKeyManager interface {
 	Revoke(ctx context.Context, tenant TenantContext, id int64) (bool, error)
 }
 
+// MemoryAPIKeyResolver is the local-test key resolver (ALLOW_MEMORY_API_KEYS=true).
+// IDs are drawn from an atomic counter so concurrent Create calls can never
+// collide or overwrite — the counter is safe even without the write lock.
 type MemoryAPIKeyResolver struct {
 	mu   sync.RWMutex
 	keys map[string]TenantContext
-	next int64
+	next atomic.Int64
 }
 
 func NewMemoryAPIKeyResolver(rawKey string, tenant TenantContext) *MemoryAPIKeyResolver {
-	resolver := &MemoryAPIKeyResolver{keys: map[string]TenantContext{}, next: 1}
+	resolver := &MemoryAPIKeyResolver{keys: map[string]TenantContext{}}
 	if rawKey != "" {
-		tenant.KeyID = resolver.next
-		resolver.next++
+		tenant.KeyID = resolver.next.Add(1)
 		if len(tenant.Scopes) == 0 {
 			tenant.Scopes = []string{"query", "admin"}
 		}
@@ -123,10 +126,9 @@ func (m *MemoryAPIKeyResolver) Create(ctx context.Context, tenant TenantContext,
 		return CreateAPIKeyResponse{}, err
 	}
 	req = normalizeCreateAPIKeyRequest(req)
+	id := m.next.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.next++
-	id := m.next
 	m.keys[hashAPIKey(rawKey)] = TenantContext{
 		TenantID:     tenant.TenantID,
 		Region:       tenant.Region,
@@ -206,6 +208,21 @@ func NewPostgresAPIKeyResolver(ctx context.Context, databaseURL string, bootstra
 	return resolver, nil
 }
 
+// dummyBcryptHash is compared when the prefix pass finds no matching
+// key, so an absent prefix still costs one bcrypt verification — the
+// same latency class as a present-prefix/wrong-secret key. Without it,
+// Resolve would be a timing oracle that reveals which key prefixes
+// exist (useful reconnaissance for prefix-key enumeration).
+var dummyBcryptHash = mustBcryptDummyHash()
+
+func mustBcryptDummyHash() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("groundwork-timing-equalizer-constant"), bcrypt.DefaultCost)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
 func (p *PostgresAPIKeyResolver) Resolve(ctx context.Context, rawKey string) (TenantContext, error) {
 	if strings.TrimSpace(rawKey) == "" {
 		return TenantContext{}, ErrInvalidAPIKey
@@ -245,6 +262,9 @@ func (p *PostgresAPIKeyResolver) Resolve(ctx context.Context, rawKey string) (Te
 				return tenant, nil
 			}
 		}
+		// No match anywhere (absent prefix or wrong secret): equalize the
+		// latency with the matched-prefix path before failing closed.
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(rawKey))
 		return TenantContext{}, ErrInvalidAPIKey
 	}
 	tenant.Scopes = splitScopes(scopesText)

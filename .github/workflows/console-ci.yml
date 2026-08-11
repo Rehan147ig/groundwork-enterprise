@@ -42,5 +42,11 @@ jobs:
       - name: Install dependencies (workspace root)
         run: npm ci
 
+      - name: Audit production dependencies (fails on high+)
+        # Supply-chain gate: `npm ci` installs exactly the locked tree, so
+        # the audit checks the deployed packages — update them via
+        # `npm audit fix` (or a deliberate version bump) when this fails.
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Build console
         run: npm run build --workspace apps/console

@@ -29,6 +29,7 @@ import {
   ToolAction,
   TransferPolicy,
 } from "@/lib/governanceProxy";
+import { sanitizeRichText } from "@/lib/sanitize";
 
 // ----- types (mirror the /api proxy responses) -----
 type Decision = { document_id: string; allowed: boolean; reason: string };
@@ -1812,7 +1813,7 @@ export default function ConsolePage() {
                   <div key={i} className={`finding ${f.severity}`}>
                     <div className="body">
                       <div className="ttl">{f.title}</div>
-                      <div className="det" dangerouslySetInnerHTML={{ __html: f.detail }} />
+                      <div className="det" dangerouslySetInnerHTML={{ __html: sanitizeRichText(f.detail) }} />
                     </div>
                     <span className={`badge ${f.severity}`}>{f.severity.toUpperCase()}</span>
                   </div>

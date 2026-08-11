@@ -59,6 +59,21 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Ban dynamic SQL construction
+        # Production SQL must be parameterized ($N placeholders). A
+        # fmt.Sprintf-built statement fragments the query plan and is an
+        # injection footgun even when "safe" today. Tests may build SQL,
+        # so only non-test files are scanned.
+        run: |
+          if grep -rEn "fmt\.Sprintf\([^)]*(SELECT|INSERT|UPDATE|DELETE|ALTER)" --include="*.go" . --exclude="*_test.go" | grep -v "^Binary"; then
+            echo "::error::Dynamic SQL via fmt.Sprintf is banned. Use parameterized \$N queries."
+            exit 1
+          fi
+          echo "no dynamic SQL in production code"
+
+      - name: govulncheck (supply-chain vulnerability scan)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Test
         run: go test ./...
 

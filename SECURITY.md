@@ -57,7 +57,13 @@ Out of scope:
 - **Immutable audit:** append-only traces with SHA-256 digests and a `/v1/audit/verify` endpoint. See [docs/worm-archive.md](docs/worm-archive.md).
 - **Live permission checks:** SpiceDB evaluated at query time — no permission caching. See [docs/spicedb-migration.md](docs/spicedb-migration.md).
 - **Secrets scanning** in CI on every push: `.github/workflows/secret-scan.yml`.
+- **Supply-chain scanning:** `govulncheck` (Go) and `npm audit --audit-level=high` (production deps) are required CI checks.
 - **Non-bypassable deployment:** only Groundwork ingress is exposed; internal backends are network-isolated. See [docs/non-bypassable-deployment.md](docs/non-bypassable-deployment.md).
+- **Full threat model:** trust boundaries, compromise scenarios, finding status, and key-rotation procedures live in [docs/threat-model.md](docs/threat-model.md). Notable posture decisions:
+  - Console API routes use **header-based auth only** (no cookies) — CSRF does not apply. If cookie sessions are ever added, SameSite=Strict + CSRF tokens are required first.
+  - Demo mode (`ALLOW_DEMO_IDENTITY`, `ALLOW_MEMORY_API_KEYS`, `GROUNDWORK_DEMO_MODE`) is **fail-closed by default**: the runtime refuses to start with those flags outside local/dev `GROUNDWORK_ENV`, and the console serves synthetic data only with an explicit opt-in.
+  - Identity assertions from the console use **RS256** (private key at the console, public key at the runtime) when configured; HS256 remains a local/dev fallback.
+  - Leak-report details are sanitized at the API boundary and at render time (only `<code>` is permitted); client-supplied API keys are rejected.
 
 ## Attribution
 

@@ -33,11 +33,38 @@ type FileWORMStore struct {
 	mu   sync.Mutex
 }
 
-var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	tenantIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	artifactIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 // NewFileWORMStore returns a store rooted at root (created if needed).
-func NewFileWORMStore(root string) *FileWORMStore {
-	return &FileWORMStore{root: root}
+// The root is absolutized and cleaned at construction, and every path
+// built from it is verified to stay inside it — defense in depth for
+// the tenant-dir/blob path construction below.
+func NewFileWORMStore(root string) (*FileWORMStore, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, fmt.Errorf("archive root must not be empty")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("archive root %q: %w", root, err)
+	}
+	return &FileWORMStore{root: filepath.Clean(abs)}, nil
+}
+
+// inRoot joins elem onto the store root and fails closed if the result
+// escapes it (e.g. via separators or ..), so a path can never walk out
+// of the archive even if an input slips past the format regexes.
+func (s *FileWORMStore) inRoot(elem ...string) (string, error) {
+	parts := make([]string, 0, len(elem)+1)
+	parts = append(parts, s.root)
+	parts = append(parts, elem...)
+	p := filepath.Clean(filepath.Join(parts...))
+	if p != s.root && !strings.HasPrefix(p, s.root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: path escapes archive root", ErrArchiveIntegrity)
+	}
+	return p, nil
 }
 
 // canonicalMeta renders meta deterministically (sorted k=v, joined by &)
@@ -94,7 +121,7 @@ func (s *FileWORMStore) tenantDir(tenantID string) (string, error) {
 	if !tenantIDPattern.MatchString(tenantID) {
 		return "", fmt.Errorf("%w: invalid tenant id %q", ErrArchiveIntegrity, tenantID)
 	}
-	return filepath.Join(s.root, tenantID), nil
+	return s.inRoot(tenantID)
 }
 
 func (s *FileWORMStore) manifestPath(tenantID string) (string, error) {
@@ -105,7 +132,14 @@ func (s *FileWORMStore) manifestPath(tenantID string) (string, error) {
 	return filepath.Join(dir, "manifest"), nil
 }
 
+// blobPath builds the sealed-payload path. The artifact ID must be
+// exactly 64 hex chars (a content-addressed SHA-256), so it can never
+// carry separators or traversal segments even if a caller passes an
+// unvalidated value.
 func (s *FileWORMStore) blobPath(tenantID, artifactID string) (string, error) {
+	if !artifactIDPattern.MatchString(artifactID) {
+		return "", fmt.Errorf("%w: invalid artifact id %q", ErrArchiveIntegrity, artifactID)
+	}
 	dir, err := s.tenantDir(tenantID)
 	if err != nil {
 		return "", err

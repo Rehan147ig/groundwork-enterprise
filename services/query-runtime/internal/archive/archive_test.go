@@ -17,7 +17,11 @@ import (
 
 func newTestStore(t *testing.T) *FileWORMStore {
 	t.Helper()
-	return NewFileWORMStore(t.TempDir())
+	s, err := NewFileWORMStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileWORMStore: %v", err)
+	}
+	return s
 }
 
 func seal(t *testing.T, s *FileWORMStore, tenantID, kind string, payload []byte, meta map[string]string) Artifact {

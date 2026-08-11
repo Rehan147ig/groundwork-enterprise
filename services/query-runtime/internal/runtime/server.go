@@ -445,7 +445,24 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/security/acl-sync/okta/{tenant_id}", s.handleOktaWebhook)
 	// Phase 8.5: correlation IDs on every response (echo) and request
 	// (context) — the query handler stamps the id as the engine trace id.
-	return s.correlationMiddleware(mux)
+	return s.securityHeaders(s.correlationMiddleware(mux))
+}
+
+// securityHeaders applies baseline hardening headers to every response:
+// a JSON API never needs framing, MIME sniffing, or referer leakage, and
+// /v1/* operational data must never be cached by browsers or proxies
+// (audit/leak-report/agents responses are tenant-sensitive).
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			h.Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

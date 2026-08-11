@@ -3,7 +3,6 @@ package aclsync
 import (
 	"context"
 	"log/slog"
-	"math/rand"
 	"time"
 )
 
@@ -231,7 +230,7 @@ func backoffDelay(base, max time.Duration, attempt int) time.Duration {
 		d = base
 	}
 	half := d / 2
-	return half + time.Duration(rand.Int63n(int64(half)+1))
+	return half + cryptoJitter(int64(half)+1)
 }
 
 // changeToTuples maps a source permission change to tuple writes/deletes.

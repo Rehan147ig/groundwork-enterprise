@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -368,6 +369,12 @@ func main() {
 		log.Fatal(err)
 	}
 	allowDemoIdentity := os.Getenv("ALLOW_DEMO_IDENTITY") == "true"
+	if allowDemoIdentity && !isLocalEnv() {
+		log.Fatalf("ALLOW_DEMO_IDENTITY=true is forbidden when GROUNDWORK_ENV=%q: the demo identity path has no authentication and must never run outside local/dev (set GROUNDWORK_ENV=local or remove the flag)", os.Getenv("GROUNDWORK_ENV"))
+	}
+	if os.Getenv("ALLOW_MEMORY_API_KEYS") == "true" && !isLocalEnv() {
+		log.Fatalf("ALLOW_MEMORY_API_KEYS=true is forbidden when GROUNDWORK_ENV=%q: in-memory API keys are for local tests only (set GROUNDWORK_ENV=local or remove the flag)", os.Getenv("GROUNDWORK_ENV"))
+	}
 
 	// Canonical identity (GROUNDWORK_CANONICAL_IDENTITY=true): resolve each verified end-user
 	// to a tenant-scoped principal so the engine checks user:principal:<uuid> instead of the
@@ -885,6 +892,20 @@ func env(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// isLocalEnv reports whether GROUNDWORK_ENV (unset counts as local) is
+// an explicitly local/development/test value. It gates the fail-closed
+// startup guards on ALLOW_DEMO_IDENTITY and ALLOW_MEMORY_API_KEYS: those
+// flags have no authentication and must never be enabled in a
+// production-like deployment.
+func isLocalEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GROUNDWORK_ENV"))) {
+	case "", "local", "dev", "development", "test", "testing", "demo":
+		return true
+	default:
+		return false
+	}
 }
 
 func envFloat(key string, fallback float64) float64 {

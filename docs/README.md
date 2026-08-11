@@ -11,6 +11,7 @@ Index of the Groundwork platform documentation.
 
 ## Security & Governance
 
+- [Threat model](threat-model.md) — trust boundaries, compromise scenarios, finding status, key rotation.
 - [Governance](governance.md) — decision gates, delegation, fail-closed guarantees.
 - [SpiceDB migration](spicedb-migration.md) — authorization backend cutover record (COMPLETE).
 - [ACL sync framework](acl-sync-framework.md) — relationship sync, drift detection, revocation.

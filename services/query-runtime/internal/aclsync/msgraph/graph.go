@@ -7,10 +7,11 @@ package msgraph
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -437,7 +438,22 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	half := d / 2
-	return half + time.Duration(rand.Int63n(int64(half)+1))
+	return half + backoffJitter(int64(half)+1)
+}
+
+// backoffJitter returns a uniform delay in [0, n) from crypto/rand so
+// Graph polling/backoff timing is never predictable (a predictable
+// retry window would leak sync state to an observer). Degrades to the
+// full delay on an entropy read failure.
+func backoffJitter(n int64) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return time.Duration(n)
+	}
+	return time.Duration(binary.BigEndian.Uint64(buf[:]) % uint64(n))
 }
 
 // redactURL strips the query string so logs never carry tokens/links with secrets.

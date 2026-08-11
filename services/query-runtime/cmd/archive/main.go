@@ -128,7 +128,10 @@ func cmdSeal(args []string) error {
 		}
 		meta["encryption"] = "envelope_aes256gcm"
 	}
-	store := archive.NewFileWORMStore(*root)
+	store, err := archive.NewFileWORMStore(*root)
+	if err != nil {
+		return err
+	}
 	artifact, err := store.Seal(context.Background(), *tenantID, *kind, payload, meta)
 	if err != nil {
 		return err
@@ -151,7 +154,10 @@ func cmdList(args []string) error {
 	if strings.TrimSpace(*tenantID) == "" {
 		return fmt.Errorf("--tenant is required")
 	}
-	store := archive.NewFileWORMStore(*root)
+	store, err := archive.NewFileWORMStore(*root)
+	if err != nil {
+		return err
+	}
 	rows, err := store.List(context.Background(), *tenantID)
 	if err != nil {
 		return err
@@ -173,7 +179,10 @@ func cmdVerify(args []string) error {
 	if strings.TrimSpace(*tenantID) == "" {
 		return fmt.Errorf("--tenant is required")
 	}
-	store := archive.NewFileWORMStore(*root)
+	store, err := archive.NewFileWORMStore(*root)
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
 	target := strings.TrimSpace(*artifactID)
 	if target == "" {
@@ -208,7 +217,10 @@ func cmdRestore(args []string) error {
 	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*artifactID) == "" || strings.TrimSpace(*out) == "" {
 		return fmt.Errorf("--tenant, --id and --out are required")
 	}
-	store := archive.NewFileWORMStore(*root)
+	store, err := archive.NewFileWORMStore(*root)
+	if err != nil {
+		return err
+	}
 	payload, artifact, err := store.Open(context.Background(), *tenantID, *artifactID)
 	if err != nil {
 		return fmt.Errorf("INTEGRITY tenant=%s: %w", *tenantID, err)

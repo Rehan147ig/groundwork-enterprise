@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -162,7 +163,7 @@ func runPathLoop(ctx context.Context, c config, httpc *http.Client, name, agentI
 // runQuery drives POST /v1/query as a random user. A 200 with citations
 // is "allowed"; a 200 with no citations is the fail-closed result.
 func runQuery(httpc *http.Client, c config) (outcome, time.Duration) {
-	uidx := rand.Intn(c.users)
+	uidx := cryptoIndex(c.users)
 	tok := mintJWT(c.jwtSecret, userID(uidx))
 	start := time.Now()
 	status, citations, err := postQuery(httpc, c, tok)
@@ -448,4 +449,18 @@ func newConnectorStub() *httptest.Server {
 
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// cryptoIndex returns a uniform index in [0, n) drawn from crypto/rand
+// (math/rand would make load-test user selection predictable). Degrades
+// to a time-seeded value on an entropy read failure.
+func cryptoIndex(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return time.Now().Nanosecond() % n
+	}
+	return int(binary.BigEndian.Uint64(buf[:]) % uint64(n))
 }

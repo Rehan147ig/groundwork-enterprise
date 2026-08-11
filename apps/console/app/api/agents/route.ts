@@ -8,10 +8,11 @@ import {
 
 // Proxies the runtime's Agent Registry (GET /v1/agents list, POST
 // /v1/agents create) using a server-side API key + console-admin
-// assertion. Falls back to curated demo data when the runtime is
-// unreachable or the registry is not wired (503) — the console must look
-// alive in a pitch even with a cold backend. `source` tells the UI which
-// path it got.
+// assertion. Falls back to curated demo data ONLY when the console is
+// explicitly running in demo mode (GROUNDWORK_DEMO_MODE=true) AND the
+// runtime is unreachable or the registry is not wired (503) — in any
+// other deployment a missing backend is a hard error, never silent
+// synthetic data. `source` tells the UI which path it got.
 
 const DEMO_AGENTS: Agent[] = [
   {
@@ -114,7 +115,22 @@ export async function GET(request: NextRequest) {
       /* runtime unreachable: demo */
     }
   }
-  return NextResponse.json({ source: "demo", agents: DEMO_AGENTS, count: DEMO_AGENTS.length });
+  return demoData({ source: "demo", agents: DEMO_AGENTS, count: DEMO_AGENTS.length });
+}
+
+// demoData is the fail-closed gate for curated demo responses: only
+// GROUNDWORK_DEMO_MODE=true opts the console into serving synthetic
+// data in place of a live backend. Production should never send DEMO_*
+// payloads (they leak internal data shapes); with the flag off these
+// routes return 503 instead of fabricating data.
+function demoData<T>(data: T): NextResponse {
+  if (process.env.GROUNDWORK_DEMO_MODE !== "true") {
+    return NextResponse.json(
+      { source: "error", error: "agent_registry_unavailable" },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json(data);
 }
 
 export async function POST(request: NextRequest) {
