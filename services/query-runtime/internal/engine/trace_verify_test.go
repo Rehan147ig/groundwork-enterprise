@@ -347,3 +347,57 @@ func TestPostgresAuditWriter_EmptyDecisionsAreNull(t *testing.T) {
 		t.Fatalf("expected zero normalised decision rows, got %d", count)
 	}
 }
+
+// buildSaltedChain produces a hash-chained sequence under the salted
+// formula, the way PostgresAuditWriter.Write would once SetSalt is applied.
+func buildSaltedChain(salt string, entries ...AuditEntry) []AuditEntry {
+	prev := ""
+	out := make([]AuditEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.TimestampUTC.IsZero() {
+			e.TimestampUTC = time.Now().UTC()
+		}
+		e.PreviousHash = prev
+		e.ImmutableDigest = ComputeDigestWithSalt(e, salt)
+		prev = e.ImmutableDigest
+		out = append(out, e)
+	}
+	return out
+}
+
+func TestComputeDigestWithSaltDiffersFromUnsalted(t *testing.T) {
+	entry := sampleEntry("t-salt-1", "alice")
+	if got := ComputeDigest(entry); got == ComputeDigestWithSalt(entry, "aS3cr3tAuditS4lt") {
+		t.Fatal("salted digest must differ from the unsalted digest")
+	}
+	if a, b := ComputeDigestWithSalt(entry, "salt-one"), ComputeDigestWithSalt(entry, "salt-two"); a == b {
+		t.Fatal("different salts must produce different digests")
+	}
+}
+
+func TestVerifyChainWithSaltSemantics(t *testing.T) {
+	salt := "correct horse battery staple"
+	chain := buildSaltedChain(salt, sampleEntry("t1", "alice"), sampleEntry("t2", "bob"), sampleEntry("t3", "carol"))
+
+	// Same salt at verify time: clean.
+	if problems := VerifyChainWithSalt(chain, salt); len(problems) != 0 {
+		t.Fatalf("same-salt verify must be clean, got: %+v", problems)
+	}
+	// Unsalted verify of a salted chain: every row is a digest mismatch —
+	// this is exactly what an operator sees if the salt is lost or changed.
+	if problems := VerifyChainWithSalt(chain, ""); len(problems) != len(chain) {
+		t.Fatalf("unsalted verify of salted chain must flag every row, got %d problems", len(problems))
+	}
+	// Wrong salt: also flagged — a tampering attacker who does not know the
+	// salt cannot manufacture digests that verify.
+	if problems := VerifyChainWithSalt(chain, "wrong-salt-1234"); len(problems) != len(chain) {
+		t.Fatalf("wrong-salt verify must flag every row, got %d problems", len(problems))
+	}
+	// The empty-salt formula must remain backward compatible: a chain built
+	// with the original formula still verifies unsalted, so pre-salt rows
+	// keep verifying after an upgrade.
+	unsalted := buildChain(sampleEntry("t1", "alice"), sampleEntry("t2", "bob"))
+	if problems := VerifyChain(unsalted); len(problems) != 0 {
+		t.Fatalf("unsalted chain must verify under the v1 formula, got: %+v", problems)
+	}
+}

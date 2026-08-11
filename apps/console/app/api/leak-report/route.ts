@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { sanitizeRichText } from "@/lib/sanitize";
 
-// Leak Report. The analysis lives in the runtime (internal/leakreport, run
-// today via cmd/leak-report). When the runtime exposes GET /v1/leak-report,
-// proxy it here. Until then this returns the curated Acme findings — the
-// same ones the leakreport package produces for the mock org — so the view
-// is demoable. Wiring the live endpoint is a one-step follow-up (a Go
-// handler that runs github.Connector.Snapshot -> leakreport.Analyze).
+// Leak Report. The analysis lives in the runtime: GET /v1/leak-report
+// (audit scope) runs github.Connector.Snapshot -> leakreport.Analyze
+// over the Postgres permission tables; this route proxies it live when
+// QUERY_RUNTIME_URL + GROUNDWORK_API_KEY are set. Without a runtime it
+// returns the curated Acme findings — the same ones the leakreport
+// package produces for the mock org — so the view is demoable.
 //
 // Every `detail` value passes through sanitizeRichText before leaving this
 // route: the console later renders it as HTML, so anything the runtime or

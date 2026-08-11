@@ -31,7 +31,8 @@ import (
 // PostgresAuditReader is the runtime.AuditReader implementation backed
 // by the immutable audit_log table.
 type PostgresAuditReader struct {
-	db *sql.DB
+	db   *sql.DB
+	salt string
 }
 
 // NewPostgresAuditReader wraps a *sql.DB. The DB must point at the
@@ -41,6 +42,11 @@ type PostgresAuditReader struct {
 func NewPostgresAuditReader(db *sql.DB) *PostgresAuditReader {
 	return &PostgresAuditReader{db: db}
 }
+
+// SetSalt binds the deployment's audit salt into VerifyTenantChain
+// (L-004). Must match the salt the writer was configured with, or
+// verification reports digest mismatches on every salted row.
+func (p *PostgresAuditReader) SetSalt(salt string) { p.salt = salt }
 
 // Assert compile-time conformance to the runtime contract so any
 // future change to runtime.AuditReader fails the build here, not at
@@ -431,7 +437,7 @@ func (p *PostgresAuditReader) VerifyTenantChain(ctx context.Context, tenantID st
 	if err != nil {
 		return runtime.AuditVerifyResult{}, fmt.Errorf("load chain: %w", err)
 	}
-	problems := VerifyChain(entries)
+	problems := VerifyChainWithSalt(entries, p.salt)
 	result := runtime.AuditVerifyResult{
 		Verified:       len(problems) == 0,
 		EntriesChecked: len(entries),

@@ -66,8 +66,26 @@ type AgentVersion = { id: string; version: string; model_provider?: string; mode
 type LifecycleEvent = { id: string; agent_version_id?: string; actor_principal_id: string; event_type: string; previous_state: string; new_state: string; reason: string; immutable_digest: string; created_at: string };
 type AgentDetail = { source: string; agent: Agent; versions: AgentVersion[]; lifecycle_events: LifecycleEvent[] };
 type AgentsResp = { source: string; agents: Agent[]; count: number };
+type BreakGlassGrant = {
+  id: string;
+  tenant_id: string;
+  operator_principal_id: string;
+  reason: string;
+  duration_minutes: number;
+  key_id: number;
+  key_prefix: string;
+  status: "active" | "expired" | "revoked";
+  expires_at: string;
+  requested_at: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  revocation_reason?: string;
+  immutable_digest: string;
+  created_at: string;
+};
+type BreakGlassResp = { source: string; grants: BreakGlassGrant[] } | { source: string; error: string };
 
-const VIEWS = ["overview", "connect", "agent", "agents", "governance", "trust", "controls", "audit", "leak"] as const;
+const VIEWS = ["overview", "connect", "agent", "agents", "governance", "trust", "controls", "break", "audit", "leak"] as const;
 type View = (typeof VIEWS)[number];
 const META: Record<View, [string, string]> = {
   overview: ["Overview", "Runtime governance at a glance"],
@@ -77,6 +95,7 @@ const META: Record<View, [string, string]> = {
   governance: ["Delegated Authority", "Tools · grants · runs · one-time approvals"],
   trust: ["Multi-Agent Trust", "Trust edges · external agents · consent · budgets"],
   controls: ["Incident Response", "Emergency controls · budgets · evidence · outbox"],
+  break: ["Break Glass", "Time-bounded emergency admin access"],
   audit: ["Audit Timeline", "Tamper-evident decision log"],
   leak: ["Leak Report", "Pre-emptive exposure scan"],
 };
@@ -171,6 +190,15 @@ export default function ConsolePage() {
   const [question, setQuestion] = useState("summarize the executive strategy");
   const [tryResult, setTryResult] = useState<string>("");
 
+  // ---- Phase 8.4: break-glass operator access ----
+  const [bgGrants, setBgGrants] = useState<BreakGlassGrant[]>([]);
+  const [bgSource, setBgSource] = useState("offline");
+  const [bgError, setBgError] = useState("");
+  const [bgBusy, setBgBusy] = useState<string>("");
+  const [bgReason, setBgReason] = useState("");
+  const [bgDuration, setBgDuration] = useState(60);
+  const [bgMinted, setBgMinted] = useState<{ key?: string; grant?: BreakGlassGrant } | null>(null);
+
   const load = useCallback(async () => {
     try {
       const [a, l, ag] = await Promise.all([
@@ -192,6 +220,7 @@ export default function ConsolePage() {
       loadExport("eu_ai_act");
       loadConnectors();
       loadTrust();
+      loadBreakGlass();
     } catch {
       /* routes always return demo data; ignore */
     }
@@ -461,6 +490,51 @@ export default function ConsolePage() {
       setExtBudgetSource(eb.source ?? "demo");
       setDelegations(dg.grants ?? []);
     } catch { /* demo fallback from the proxy */ }
+  }
+
+  // ---- Phase 8.4: break-glass loaders ----
+  async function loadBreakGlass() {
+    setBgError("");
+    try {
+      const r = await fetch("/api/break-glass").then((x) => x.json());
+      if (r.error) { setBgGrants([]); setBgSource("offline"); return; }
+      setBgGrants(r.grants ?? []);
+      setBgSource(r.source ?? "demo");
+    } catch { /* runtime unreachable — described in the view */ }
+  }
+
+  async function openBreakGlass() {
+    setBgError("");
+    if (bgReason.trim().length < 10) { setBgError("Justification must be at least 10 characters."); return; }
+    setBgBusy("open");
+    try {
+      const r = await fetch("/api/break-glass", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: bgReason.trim(), duration_minutes: bgDuration }),
+      });
+      const data = await r.json();
+      if (!r.ok) { setBgError(data.error ?? `open failed (${r.status})`); return; }
+      setBgMinted({ key: data.key, grant: data.grant });
+      setBgReason("");
+      await loadBreakGlass();
+    } finally { setBgBusy(""); }
+  }
+
+  async function revokeBreakGlass(grantId: string) {
+    setBgError("");
+    setBgBusy(`revoke:${grantId}`);
+    try {
+      const r = await fetch(`/api/break-glass/${grantId}/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: bgReason.trim() || "console break-glass revocation" }),
+      });
+      const data = await r.json();
+      if (!r.ok) { setBgError(data.error ?? `revoke failed (${r.status})`); return; }
+      setBgMinted(null);
+      await loadBreakGlass();
+    } finally { setBgBusy(""); }
   }
 
   async function loadChain(grantId: string) {
@@ -1756,6 +1830,101 @@ export default function ConsolePage() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {view === "break" && (
+              <div className="view">
+                <p className="lead">Break-glass operator access</p>
+                <p className="dim" style={{ marginBottom: 18 }}>
+                  Time-bounded emergency admin grants. Opening one mints a short-lived admin-scoped
+                  API key; it is shown <b>exactly once</b> and is never persisted.{" "}
+                  {bgSource === "live" ? "Live grants." : "Runtime offline — emergency controls require a live runtime and are never demo-faked."}
+                </p>
+
+                <div className="grid g3" style={{ marginBottom: 20 }}>
+                  <div className="card"><div className="label">Active grants</div><div className="stat a">{bgGrants.filter((g) => g.status === "active").length}</div></div>
+                  <div className="card"><div className="label">Revoked</div><div className="stat">{bgGrants.filter((g) => g.status === "revoked").length}</div></div>
+                  <div className="card"><div className="label">Expired</div><div className="stat">{bgGrants.filter((g) => g.status === "expired").length}</div></div>
+                </div>
+
+                {bgError && <div className="card" style={{ marginBottom: 16, borderColor: "var(--red)", color: "var(--red)", fontSize: 12.5 }}>{bgError}</div>}
+
+                <div className="card" style={{ marginBottom: 18, borderColor: "rgba(225,29,72,.45)" }}>
+                  <p className="kicker" style={{ color: "var(--red)" }}>Open an emergency grant — irreversible exposure while active</p>
+                  <textarea
+                    className="mono"
+                    rows={2}
+                    placeholder="Justification (mandatory, ≥10 chars) — e.g. 'prod incident: root pipeline leaking to staging'"
+                    value={bgReason}
+                    onChange={(e) => setBgReason(e.target.value)}
+                    style={{ width: "100%", marginBottom: 10 }}
+                  />
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    {[60, 240, 1440].map((m) => (
+                      <label key={m} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <input type="radio" name="bg-duration" checked={bgDuration === m} onChange={() => setBgDuration(m)} />
+                        {m === 60 ? "1 hour" : m === 240 ? "4 hours" : "24 hours"}
+                      </label>
+                    ))}
+                    <button
+                      className="btn"
+                      style={{ background: "linear-gradient(92deg,#e11d48,#fb7185)", marginLeft: "auto" }}
+                      disabled={bgBusy !== "" || bgReason.trim().length < 10}
+                      onClick={() => { if (window.confirm("Open a time-bounded emergency admin grant? The minted key grants admin scope until it expires.")) openBreakGlass(); }}
+                    >
+                      {bgBusy === "open" ? "Opening…" : "Open grant"}
+                    </button>
+                  </div>
+                  <p className="dim" style={{ marginTop: 10, fontSize: 12 }}>
+                    Duration is capped by the runtime&apos;s <code>BREAK_GLASS_MAX_MINUTES</code> — requesting more fails, never silently shortens.
+                  </p>
+                </div>
+
+                {bgMinted && bgMinted.key && (
+                  <div className="card" style={{ marginBottom: 18, borderColor: "rgba(225,29,72,.6)", background: "rgba(225,29,72,.06)" }}>
+                    <div className="label" style={{ color: "var(--red)", marginBottom: 8 }}>Minted admin key — displayed once, never again</div>
+                    <div className="code">
+                      <button className="cp" onClick={() => { navigator.clipboard?.writeText(bgMinted.key ?? ""); }}>Copy</button>
+                      {bgMinted.key}
+                    </div>
+                    {bgMinted.grant && (
+                      <p className="dim" style={{ marginTop: 8, fontSize: 12 }}>
+                        Grant {bgMinted.grant.id} · expires {new Date(bgMinted.grant.expires_at).toLocaleString()} · revoke below when the incident is over.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {(bgGrants ?? []).map((g) => {
+                  const active = g.status === "active";
+                  const busy = bgBusy === `revoke:${g.id}`;
+                  return (
+                    <div key={g.id} className="row">
+                      <span className={`badge ${active ? "medium" : g.status === "revoked" ? "deny" : "low"}`}>{g.status.toUpperCase()}</span>
+                      <div>
+                        <div className="who">{g.reason}</div>
+                        <div className="meta">
+                          <b>{g.duration_minutes} min</b> · key <span className="mono">{g.key_prefix}</span> · {g.operator_principal_id}
+                          {g.revoked_by ? <> · revoked by {g.revoked_by}{g.revocation_reason ? ` — ${g.revocation_reason}` : ""}</> : null}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                        {active && (
+                          <button
+                            className="btn ghost"
+                            disabled={busy}
+                            onClick={(e) => { e.stopPropagation(); if (window.confirm("Revoke this grant now? The minted admin key is revoked immediately (fail-closed on its next use).")) revokeBreakGlass(g.id); }}
+                          >
+                            {busy ? "Revoking…" : "Revoke"}
+                          </button>
+                        )}
+                        <div className="t">{new Date(g.requested_at).toLocaleString()}<br />{active ? <>expires {new Date(g.expires_at).toLocaleTimeString()}</> : <span style={{ color: "var(--faint)" }}>{g.revoked_at ? "revoked " + new Date(g.revoked_at).toLocaleString() : "expired"}</span>}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+                {bgGrants.length === 0 && bgSource === "live" && <div className="card"><p className="dim">No break-glass grants recorded for this tenant.</p></div>}
               </div>
             )}
 

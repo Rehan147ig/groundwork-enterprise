@@ -236,6 +236,20 @@ func main() {
 	}
 	defer closeAudit()
 
+	// L-004: bind IMMUTABLE_AUDIT_SALT into every audit digest (write +
+	// verify). Predictable values are refused at startup; empty keeps the
+	// original v1 formula for local/dev and pre-salt deployments.
+	auditSalt := os.Getenv("IMMUTABLE_AUDIT_SALT")
+	if err := validateAuditSalt(auditSalt); err != nil {
+		log.Fatal(err)
+	}
+	if auditDB != nil && auditSalt == "" {
+		log.Println("warning: IMMUTABLE_AUDIT_SALT is unset with the Postgres ledger — audit digests use the unsalted v1 formula. Set a strong random salt (>=16 chars) in production; never change it after first write (see docs/threat-model.md L-004).")
+	} else if w, ok := auditor.(*engine.PostgresAuditWriter); ok && auditSalt != "" {
+		w.SetSalt(auditSalt)
+		log.Printf("IMMUTABLE_AUDIT_SALT bound into audit write path (%d chars)", len(auditSalt))
+	}
+
 	core := &engine.Engine{
 		Config: engine.TimeoutConfig{
 			Total:        cfg.QueryTimeout,
@@ -591,7 +605,11 @@ func main() {
 	// behavior since the in-memory trace store doesn't hold the
 	// hash-chained ledger the read API exposes.
 	if auditDB != nil {
-		server.SetAuditReader(engine.NewPostgresAuditReader(auditDB))
+		auditReader := engine.NewPostgresAuditReader(auditDB)
+		if auditSalt != "" {
+			auditReader.SetSalt(auditSalt)
+		}
+		server.SetAuditReader(auditReader)
 		// PR #22 HA fix #3: register a Postgres reachability probe
 		// with /readyz so an unreachable DB takes the pod out of
 		// rotation. The Pinger context budget is short (1s) — a slow
@@ -963,6 +981,46 @@ func buildAuditWriter(databaseURL string, backend runtime.Backend, timeout time.
 	// round-trip (advisory lock + select + insert) and would fail audit writes — and thus
 	// fail queries closed — under load or on a cold connection.
 	return engine.NewPostgresAuditWriterWithTimeout(db, timeout), db, func() { _ = db.Close() }, nil
+}
+
+// predictableAuditSalts are IMMUTABLE_AUDIT_SALT values that are trivially
+// guessable — exactly the ones an attacker with table-write privileges
+// would try first when recomputing digests after tampering (L-004). Any
+// non-empty salt on this list is a misconfiguration; the runtime refuses
+// to start rather than run with a salt that provides no protection.
+var predictableAuditSalts = map[string]bool{
+	"change-me":              true,
+	"change_me":              true,
+	"changeme":               true,
+	"default":                true,
+	"default-salt":           true,
+	"default_salt":           true,
+	"default-salt-change-me": true,
+	"default_salt_change_me": true,
+	"secret":                 true,
+	"password":               true,
+	"salt":                   true,
+	"groundwork":             true,
+	"groundwork-salt":        true,
+	"groundwork_audit_salt":  true,
+}
+
+// validateAuditSalt enforces the L-004 guard: predictable non-empty
+// IMMUTABLE_AUDIT_SALT values are refused at startup. An empty salt is
+// allowed — it reproduces the original digest formula, which every local
+// and pre-salt deployment relies on — but production operators are
+// advised (in the startup log and in fly.toml) to set a strong one.
+func validateAuditSalt(salt string) error {
+	if salt == "" {
+		return nil
+	}
+	if predictableAuditSalts[strings.ToLower(strings.TrimSpace(salt))] {
+		return fmt.Errorf("IMMUTABLE_AUDIT_SALT is set to a predictable value %q — refusing to run with a salt that provides no tamper-evidence protection. Generate a strong random value and set it once; never change it afterwards (changing it invalidates the chain). See docs/threat-model.md L-004.", salt)
+	}
+	if len(salt) < 16 {
+		return fmt.Errorf("IMMUTABLE_AUDIT_SALT must be at least 16 characters (got %d)", len(salt))
+	}
+	return nil
 }
 
 // buildPrincipalResolver constructs the canonical principal resolver: the Postgres-backed

@@ -109,7 +109,7 @@ SpiceDB holds the full relationship graph.
 | L-001 | Health endpoints exposed | **By design / documented** — `/healthz`/`livez`/`readyz` are unauthenticated for orchestration probes; `readyz` is tested to never leak raw dependency errors (server_test.go). Restrict the listener to the internal network in production. |
 | L-002 | Timing oracle in API-key lookup | **Fixed** — the prefix miss path now runs one bcrypt verification (`dummyBcryptHash`), equalizing latency between absent-prefix and wrong-secret keys. |
 | L-003 | Supply-chain verification | **Fixed** — `govulncheck` in `go-ci.yml`; `npm audit --omit=dev --audit-level=high` in `console-ci.yml`; Next.js bumped 16.2.4 → 16.3.0 (7 high advisories), sharp 0.34.5 → 0.35.3; `npm audit` now reports 0 vulnerabilities. |
-| L-004 | Static audit salt (`IMMUTABLE_AUDIT_SALT=change-me`) | **Documented** — the variable is not consumed by the runtime binary; retained in `.env.example` with a MUST-replace note. Wire or remove it in a future release. |
+| L-004 | Static audit salt (`IMMUTABLE_AUDIT_SALT=change-me`) | **Fixed** — the salt is now bound into every audit digest on the write and verify paths (`engine.ComputeDigestWithSalt`, `PostgresAuditWriter.SetSalt`, `PostgresAuditReader.SetSalt`); predictable values (incl. the old `change-me`) are refused at startup (`validateAuditSalt`); an empty salt keeps the original v1 formula so pre-salt chains still verify. |
 
 ## Security headers
 

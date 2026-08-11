@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     grpc v1.82.1, pgx v5.9.2, golang-jwt v5.2.2, x/text v0.39.0; Go toolchain
     go1.26.5 (stdlib crypto/tls, crypto/x509, net/textproto advisories);
     `npm audit` and `govulncheck` now report 0 vulnerabilities.
+  - Audit salt (L-004): `IMMUTABLE_AUDIT_SALT` is now bound into every audit digest
+    on write and verify (`engine.ComputeDigestWithSalt` / `VerifyChainWithSalt`);
+    predictable values (incl. the old `change-me` placeholder) are refused at
+    startup; an empty salt keeps the v1 formula so pre-salt chains keep verifying.
+  - Console Break Glass: new view (`page.tsx`) + BFF proxy routes
+    (`app/api/break-glass` + `[id]/revoke`) for the Phase 8.4
+    `/v1/security/break-glass/grants` surface — minted admin key shown once,
+    revoke with mandatory reason, and NO demo fallback for emergency controls.
 
 ### Changed
 

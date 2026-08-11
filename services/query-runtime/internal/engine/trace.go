@@ -84,6 +84,17 @@ type AuditEntry struct {
 }
 
 func ComputeDigest(entry AuditEntry) string {
+	return ComputeDigestWithSalt(entry, "")
+}
+
+// ComputeDigestWithSalt is ComputeDigest with the deployment's
+// IMMUTABLE_AUDIT_SALT bound into the payload. The salt is the
+// write-time and verify-time secret that an attacker with table-write
+// privileges must know to recompute a digest that both matches the
+// stored row AND keeps the chain verifiable (L-004). An empty salt
+// reproduces the original v1 formula exactly, so chains written before
+// a salt was configured keep verifying.
+func ComputeDigestWithSalt(entry AuditEntry, salt string) string {
 	entry.ImmutableDigest = ""
 	payload := strings.Join([]string{
 		entry.TraceID,
@@ -110,6 +121,9 @@ func ComputeDigest(entry AuditEntry) string {
 		entry.PrincipalID,
 		entry.PreviousHash,
 	}, "\x1f")
+	if salt != "" {
+		payload = salt + "\x1f" + payload
+	}
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }
@@ -117,7 +131,14 @@ func ComputeDigest(entry AuditEntry) string {
 type PostgresAuditWriter struct {
 	db      *sql.DB
 	timeout time.Duration
+	salt    string
 }
+
+// SetSalt binds the deployment's audit salt into every digest this
+// writer computes (L-004). Set once at startup via
+// IMMUTABLE_AUDIT_SALT; the reader must be configured with the same
+// salt or chain verification reports digest mismatches.
+func (p *PostgresAuditWriter) SetSalt(salt string) { p.salt = salt }
 
 func (p *PostgresAuditWriter) Write(ctx context.Context, entry AuditEntry) error {
 	if p == nil || p.db == nil {
@@ -181,7 +202,7 @@ func (p *PostgresAuditWriter) Write(ctx context.Context, entry AuditEntry) error
 		entry.PreviousHash = prevHash.String
 	}
 
-	entry.ImmutableDigest = ComputeDigest(entry)
+	entry.ImmutableDigest = ComputeDigestWithSalt(entry, p.salt)
 
 	// PR #21: access_decisions ships as a JSONB blob co-located on the
 	// audit_log row. Marshal under the lock so the blob and the normalised
@@ -318,14 +339,20 @@ type ChainProblem struct {
 }
 
 // VerifyChain recomputes the digest of every entry and validates the previous_hash
-// linkage. Entries must be ordered oldest-first. A non-empty result means the ledger
-// was tampered with: "digest_mismatch" means a row's fields were modified after write;
-// "broken_link" means the chain was cut, reordered, or a row was deleted.
+// linkage under the original unsalted formula. New code should prefer
+// VerifyChainWithSalt with the same salt the writer was configured with.
 func VerifyChain(entries []AuditEntry) []ChainProblem {
+	return VerifyChainWithSalt(entries, "")
+}
+
+// VerifyChainWithSalt is VerifyChain with the deployment's audit salt
+// (L-004): digests recompute under the salted formula, so a row written
+// with a salt verifies only when the verifier holds the same salt.
+func VerifyChainWithSalt(entries []AuditEntry, salt string) []ChainProblem {
 	var problems []ChainProblem
 	prevDigest := ""
 	for i, entry := range entries {
-		if recomputed := ComputeDigest(entry); recomputed != entry.ImmutableDigest {
+		if recomputed := ComputeDigestWithSalt(entry, salt); recomputed != entry.ImmutableDigest {
 			problems = append(problems, ChainProblem{
 				Index:   i,
 				TraceID: entry.TraceID,
