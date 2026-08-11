@@ -1,13 +1,13 @@
 name: go-ci
 
 # Builds, formats, vets, and tests the Go query-runtime (race detector included).
-# Runs on every PR and on pushes to master. No path filter: this is a REQUIRED check,
+# Runs on every PR and on pushes to main. No path filter: this is a REQUIRED check,
 # and a path-filtered required check stays "pending" (blocking merges) on PRs that don't
 # touch its paths. Path-scoped skipping is a Phase 2 optimization (see docs/ci.md).
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read

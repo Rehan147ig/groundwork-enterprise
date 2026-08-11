@@ -1,4 +1,4 @@
-﻿name: python-ci
+name: python-ci
 
 # Installs the ingestion service's dependencies and runs its unit tests.
 # Tests run entirely against in-memory fakes (InMemoryIndex, HashEmbeddingEngine) - no live
@@ -10,7 +10,7 @@
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 permissions:
   contents: read
