@@ -1,0 +1,49 @@
+# SpiceDB → Supabase (Postgres) datastore override.
+#
+# WHY: the prod profile runs SpiceDB with SPICEDB_DATASTORE_ENGINE=memory, which loses
+# every relationship on restart (after a reboot SpiceDB is empty and the runtime
+# fail-closes everyone to zero documents). This override switches SpiceDB to the
+# Postgres datastore backed by your Supabase project, so permissions survive restarts.
+#
+# USAGE — layer this on top of the prod profile:
+#
+#   export SPICEDB_DATASTORE_CONN_URI="postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require"
+#   docker compose -f infra/docker-compose.prod.yml -f infra/docker-compose.supabase.yml up
+#
+# The spicedb-migrate service below creates SpiceDB's datastore tables in Supabase on
+# first `up` and then exits; the spicedb service waits for it to finish before starting.
+#
+# SUPABASE CONNECTION NOTES (these matter — wrong choice fails silently):
+#   * Use the SESSION pooler (port 5432) or the DIRECT connection — NOT the TRANSACTION
+#     pooler (port 6543). SpiceDB needs a session-mode connection.
+#   * Always include ?sslmode=require — Supabase requires TLS.
+#   * Keep SPICEDB_DATASTORE_CONN_URI in a secret / env var. Never commit it.
+
+services:
+  # One-shot schema migration: creates/updates SpiceDB's datastore tables in Supabase,
+  # then exits.
+  spicedb-migrate:
+    image: authzed/spicedb:latest
+    command: ["migrate", "head"]
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: ${SPICEDB_DATASTORE_CONN_URI:?set SPICEDB_DATASTORE_CONN_URI to your Supabase session-pooler URI with sslmode=require}
+    networks:
+      - groundwork
+    restart: "no"
+
+  spicedb:
+    image: authzed/spicedb:latest
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-no-tls", "--grpc-preshared-key", "${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY}", "--log-format", "json"]
+    expose:
+      - "50051"
+      - "8443"
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: ${SPICEDB_DATASTORE_CONN_URI:?set SPICEDB_DATASTORE_CONN_URI to your Supabase session-pooler URI with sslmode=require}
+      SPICEDB_LOG_FORMAT: json
+    depends_on:
+      spicedb-migrate:
+        condition: service_completed_successfully
+    networks:
+      - groundwork

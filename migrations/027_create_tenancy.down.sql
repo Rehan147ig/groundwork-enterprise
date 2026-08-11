@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS tenant_events;
+DROP TABLE IF EXISTS tenants;

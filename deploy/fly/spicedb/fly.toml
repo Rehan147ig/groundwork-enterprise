@@ -1,0 +1,61 @@
+# SpiceDB on Fly.io, backed by your Supabase Postgres datastore.
+#
+# WHY Postgres (not memory): the in-memory engine loses every relationship on
+# restart — after a reboot SpiceDB is empty and the runtime fail-closes everyone
+# to zero documents. Postgres makes the permission graph survive restarts.
+#
+# Internal-only: this app publishes NO public port. The runtime reaches it over
+# Fly private networking at groundwork-spicedb.internal:50051. SpiceDB is never
+# directly reachable from the internet (the non-bypassable design).
+#
+# DEPLOY (from repo root):
+#   fly launch --no-deploy --copy-config --config deploy/fly/spicedb/fly.toml \
+#     --name groundwork-spicedb --region <region>
+#
+#   # 1) Put the Supabase URI + preshared key in secrets (SESSION pooler / direct
+#   #    conn, sslmode=require):
+#   fly secrets set -a groundwork-spicedb \
+#     SPICEDB_DATASTORE_CONN_URI='postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require' \
+#     SPICEDB_PRESHARED_KEY='<long random string — MUST match the runtime's SPICEDB_TOKEN>'
+#
+#   # 2) One-shot: create SpiceDB's datastore tables in Supabase, then exit:
+#   fly machine run authzed/spicedb:latest migrate head --rm -a groundwork-spicedb
+#
+#   # 3) Start the server:
+#   fly deploy --config deploy/fly/spicedb/fly.toml
+#
+# The runtime's deep readiness provisions the SpiceDB SCHEMA on its first ACL
+# check — you do not provision that by hand. See the warm-up step in
+# deploy/README.md.
+
+app = "groundwork-spicedb"
+primary_region = "iad"   # MUST match the runtime's region for private networking + low latency
+
+[build]
+  image = "authzed/spicedb:latest"
+
+[env]
+  SPICEDB_DATASTORE_ENGINE = "postgres"
+  SPICEDB_LOG_FORMAT       = "json"
+  SPICEDB_GRPC_ADDR        = "0.0.0.0:50051"
+  SPICEDB_HTTP_ADDR        = "0.0.0.0:8443"
+  SPICEDB_GRPC_NO_TLS      = "true"
+  # SPICEDB_DATASTORE_CONN_URI and SPICEDB_PRESHARED_KEY are SECRETS — set them
+  # with `fly secrets set` (see header).
+
+# Run the SpiceDB server (the image entrypoint is the `spicedb` binary).
+[processes]
+  app = "serve"
+
+# Internal service (no `ports` => not published publicly). Keeps one machine warm
+# so the runtime's private-network calls always have a target.
+[[services]]
+  internal_port = 50051
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

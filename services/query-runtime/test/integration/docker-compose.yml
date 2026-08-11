@@ -1,0 +1,40 @@
+# Live backends for Groundwork's integration tests: SpiceDB (authorization), Postgres
+# (immutable audit ledger), and Qdrant (vector retrieval). This is NOT the app stack — it
+# brings up only the dependencies the integration tests talk to. Bring it up via
+# scripts/integration-test.sh, which exports the GROUNDWORK_TEST_* env the tests read.
+#
+# Datastores are ephemeral (tmpfs / no volumes): every run starts clean, which is what the
+# deterministic audit-chain assertions rely on.
+name: groundwork-integration
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: groundwork
+      POSTGRES_PASSWORD: groundwork
+      POSTGRES_DB: groundwork
+    ports:
+      # Host port is configurable so the suite can run alongside a local Postgres
+      # already bound to 5432. scripts/integration-test.sh honors the same variable.
+      - "${GW_INTEGRATION_POSTGRES_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U groundwork -d groundwork"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  spicedb:
+    # Pin a specific version (e.g. authzed/spicedb:v1.40.0) for fully reproducible CI.
+    image: authzed/spicedb:latest
+    command: serve --grpc-preshared-key groundwork --grpc-no-tls
+    ports:
+      - "50051:50051" # gRPC API (the tests use the SpiceDB adapter)
+
+  qdrant:
+    # Pin a specific version for fully reproducible CI.
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333" # REST API

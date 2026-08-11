@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# Groundwork — root .gitignore
+# ---------------------------------------------------------------------------
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Turbo
+.turbo/
+
+# Environment & secrets — NEVER commit real credentials
+.env
+.env.*
+!.env.example
+.env.local
+.env.production
+.env.development
+*.pem
+*.key
+
+# Go binaries & build artifacts
+*.exe
+*.out
+*.test
+bin/
+services/query-runtime/groundwork
+services/query-runtime/loadtest
+coverage.out
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# TypeScript / JavaScript
+*.log
+npm-debug.log*
+
+# Next.js
+apps/console/.next/
+apps/console/out/
+next-env.d.ts
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Test / coverage artifacts
+htmlcov/
+junit.xml

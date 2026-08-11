@@ -1,0 +1,48 @@
+{
+  "name": "developer-agent",
+  "description": "Developer assistant for code review triage: read-only code search and repo browsing. Commits and PR mutations are excluded by default.",
+  "read_only": true,
+  "purpose": "engineering code assistance",
+  "region": "us",
+  "tools": [
+    {
+      "name": "code_search",
+      "description": "Search the codebase and retrieve file contents (read-only).",
+      "transport": "builtin",
+      "actions": [
+        { "action": "search", "resource_type": "code", "risk_level": "low", "read_only": true, "requires_human_approval": false },
+        { "action": "read", "resource_type": "code_file", "risk_level": "low", "read_only": true, "requires_human_approval": false }
+      ]
+    },
+    {
+      "name": "repo_browser",
+      "description": "Browse repository structure and change history (read-only).",
+      "transport": "http",
+      "actions": [
+        { "action": "read", "resource_type": "repository", "risk_level": "low", "read_only": true, "requires_human_approval": false },
+        { "action": "list", "resource_type": "commit_history", "risk_level": "low", "read_only": true, "requires_human_approval": false }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "dev-agent",
+      "tools": [
+        { "tool": "code_search", "actions": ["search", "read"], "resource_scope": "read", "region_constraint": "us", "call_limit_per_run": 30, "requires_approval": false },
+        { "tool": "repo_browser", "actions": ["read", "list"], "resource_scope": "read", "region_constraint": "us", "call_limit_per_run": 20, "requires_approval": false }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 60,
+    "max_denied_per_run": 5,
+    "max_approval_required_per_run": 1,
+    "max_tool_calls_per_action_per_run": 10,
+    "max_run_duration_seconds": 600,
+    "max_citations_per_query": 10
+  },
+  "notes": [
+    "Write-capable tools (commit, merge, deploy) are intentionally absent — add them behind requires_approval=true.",
+    "Source code is a regulated asset in many jurisdictions; keep the region constraint strict."
+  ]
+}

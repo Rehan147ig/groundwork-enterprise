@@ -1,0 +1,37 @@
+{
+  "name": "healthcare-assistant",
+  "description": "Healthcare assistant: read-only patient-record lookup with the strictest evidence posture. Region and consent rules apply before any connector executes.",
+  "read_only": true,
+  "purpose": "clinical record lookup",
+  "region": "eu",
+  "tools": [
+    {
+      "name": "patient_record_lookup",
+      "description": "Read patient records from the clinical system (read-only, consent-gated).",
+      "transport": "http",
+      "actions": [
+        { "action": "read", "resource_type": "patient_record", "risk_level": "critical", "read_only": true, "requires_human_approval": true }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "clinical-agent",
+      "tools": [
+        { "tool": "patient_record_lookup", "actions": ["read"], "resource_scope": "read", "region_constraint": "eu", "call_limit_per_run": 10, "requires_approval": true }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 20,
+    "max_denied_per_run": 5,
+    "max_approval_required_per_run": 5,
+    "max_tool_calls_per_action_per_run": 3,
+    "max_run_duration_seconds": 300,
+    "max_citations_per_query": 3
+  },
+  "notes": [
+    "GDPR/health data requires consent records — create consent before connector execution (POST /v1/governance/consents).",
+    "Every action requires human approval; the agent never acts on clinical data unattended."
+  ]
+}

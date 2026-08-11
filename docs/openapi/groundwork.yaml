@@ -1,0 +1,2102 @@
+openapi: 3.0.3
+info:
+  title: Groundwork Query Runtime API
+  version: 1.0.0
+  description: |
+    Sovereign AI-agent governance control plane. Every agent is a
+    tenant-scoped identity; every tool, grant, run, and decision is
+    governed, evidence-chained, and auditable.
+
+    Authentication: every request needs an API key
+    (`X-Groundwork-API-Key: <key>`; `Authorization: Bearer` is also
+    accepted). Key scopes gate endpoint groups (`admin`, `query`,
+    `agents`, `audit`, `governance`, `usage`, `provision`, `key_admin`,
+    `break_glass`). Platform operator duties are split: `provision`
+    (tenant lifecycle), `key_admin` (API-key management), `break_glass`
+    (emergency grants) — no single role does everything; the legacy
+    `admin` scope still satisfies every check (separation of duties,
+    Phase 8.4). Mutations additionally require a
+    verified end-user assertion in `X-Groundwork-User-Assertion` (a
+    short-lived JWT minted by the enterprise identity provider) unless
+    demo identity is enabled locally. `tenant_id` always comes from the
+    verified key — never from the body.
+
+    Error envelope: `{"error": "<stable_code>"}` with a matching HTTP
+    status (400 invalid_request, 401 unauthenticated, 403 forbidden,
+    404 not_found, 409 conflict, 422 unprocessable, 503 unavailable).
+servers:
+  - url: http://localhost:8080
+    description: Local runtime
+security:
+  - apiKeyAuth: []
+tags:
+  - name: Health
+  - name: Query
+  - name: Admin
+  - name: Audit
+  - name: Agents
+  - name: Governance Tools
+  - name: Governance Delegations
+  - name: Governance Runs
+  - name: Governance Controls
+  - name: Governance Budgets
+  - name: Governance Evidence
+  - name: Governance Outbox
+  - name: Connectors
+  - name: Trust & External Agents
+  - name: Usage
+  - name: GitHub
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Service health
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Service health (alias)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+  /livez:
+    get:
+      tags: [Health]
+      summary: Liveness
+      responses:
+        '200':
+          description: Alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness with dependency probes (Postgres, SpiceDB)
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '503':
+          description: Not ready with the failing probe name
+
+  /v1/query:
+    post:
+      tags: [Query]
+      summary: Run a governed query (ACL-filtered retrieval with audit evidence)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+      responses:
+        '200':
+          description: Query results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueryResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: audit_unavailable — synchronous audit write failed (fails closed), or concurrency_limit_exceeded
+
+  /mcp:
+    post:
+      tags: [Query]
+      summary: Cloud MCP endpoint (JSON-RPC over HTTP, same engine and auth)
+      responses:
+        '200':
+          description: JSON-RPC response
+
+  /v1/admin/api-keys:
+    post:
+      tags: [Admin]
+      summary: Create an API key with scopes, tenant, and rate limit
+      security: [{ apiKeyAuth: [key_admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAPIKeyRequest' }
+      responses:
+        '200':
+          description: Key minted (raw key returned once)
+  /v1/admin/api-keys/{id}/rotate:
+    post:
+      tags: [Admin]
+      summary: Rotate an API key
+      security: [{ apiKeyAuth: [key_admin] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdParam' }
+      responses:
+        '200':
+          description: Rotated
+  /v1/admin/api-keys/{id}:
+    delete:
+      tags: [Admin]
+      summary: Revoke an API key
+      security: [{ apiKeyAuth: [key_admin] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdParam' }
+      responses:
+        '200':
+          description: Revoked
+
+  /v1/audit:
+    get:
+      tags: [Audit]
+      summary: List audit entries with filter and pagination
+      security: [{ apiKeyAuth: [audit] }]
+      parameters:
+        - { $ref: '#/components/parameters/TraceIdQuery' }
+        - { $ref: '#/components/parameters/AgentKeyIdQuery' }
+        - { $ref: '#/components/parameters/LimitQuery' }
+        - { $ref: '#/components/parameters/CursorQuery' }
+      responses:
+        '200':
+          description: Audit page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditListResponse' }
+        '503':
+          description: audit_unavailable (no Postgres ledger)
+  /v1/audit/stats:
+    get:
+      tags: [Audit]
+      summary: Per-agent audit statistics
+      security: [{ apiKeyAuth: [audit] }]
+      responses:
+        '200':
+          description: Stats
+  /v1/audit/verify:
+    get:
+      tags: [Audit]
+      summary: Verify hash-chained integrity of the audit ledger
+      security: [{ apiKeyAuth: [audit] }]
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditVerifyResponse' }
+  /v1/audit/{trace_id}:
+    get:
+      tags: [Audit]
+      summary: Full audit entry detail by trace id
+      security: [{ apiKeyAuth: [audit] }]
+      parameters:
+        - { $ref: '#/components/parameters/TraceIdParam' }
+      responses:
+        '200':
+          description: Entry detail
+
+  /v1/connect/github:
+    post:
+      tags: [GitHub]
+      summary: Re-sync GitHub memberships into SpiceDB tuples
+      security: [{ apiKeyAuth: [admin] }]
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncResult' }
+  /v1/leak-report:
+    get:
+      tags: [GitHub]
+      summary: Exposure scan of the synthetic corpus
+      security: [{ apiKeyAuth: [audit] }]
+      responses:
+        '200':
+          description: Leak findings
+
+  /v1/agents:
+    post:
+      tags: [Agents]
+      summary: Register an agent (always lands in draft)
+      security: [{ apiKeyAuth: [agents] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAgentRequest' }
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentResponse' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    get:
+      tags: [Agents]
+      summary: List agents (state filter optional)
+      security: [{ apiKeyAuth: [agents] }]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Agent list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentListResponse' }
+  /v1/agents/{agent_id}:
+    get:
+      tags: [Agents]
+      summary: Agent detail with versions and lifecycle events
+      security: [{ apiKeyAuth: [agents] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      responses:
+        '200':
+          description: Agent detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentDetailResponse' }
+  /v1/agents/{agent_id}/versions:
+    post:
+      tags: [Agents]
+      summary: Register a draft version
+      security: [{ apiKeyAuth: [agents] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddAgentVersionRequest' }
+      responses:
+        '201':
+          description: Version registered
+  /v1/agents/{agent_id}/activate:
+    post: &agentTransition
+      tags: [Agents]
+      summary: Activate the newest usable version
+      security: [{ apiKeyAuth: [agents] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      responses:
+        '200':
+          description: Transition applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentResponse' }
+  /v1/agents/{agent_id}/suspend:
+    post: *agentTransition
+  /v1/agents/{agent_id}/revoke:
+    post: *agentTransition
+  /v1/agents/{agent_id}/retire:
+    post: *agentTransition
+
+  /v1/governance/tools:
+    post:
+      tags: [Governance Tools]
+      summary: Register a governed tool
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterToolRequest' }
+      responses:
+        '201':
+          description: Tool created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceToolResponse' }
+    get:
+      tags: [Governance Tools]
+      summary: List tools
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Tool list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceToolListResponse' }
+  /v1/governance/tools/{tool_id}:
+    get:
+      tags: [Governance Tools]
+      summary: Tool detail with actions
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ToolIdParam' }
+      responses:
+        '200':
+          description: Tool detail
+  /v1/governance/tools/{tool_id}/actions:
+    post:
+      tags: [Governance Tools]
+      summary: Register a tool action
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ToolIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterToolActionRequest' }
+      responses:
+        '201':
+          description: Action created
+    get:
+      tags: [Governance Tools]
+      summary: List tool actions
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ToolIdParam' }
+      responses:
+        '200':
+          description: Action list
+  /v1/governance/tools/{tool_id}/lifecycle:
+    post:
+      tags: [Governance Tools]
+      summary: Transition tool lifecycle
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ToolIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransitionToolRequest' }
+      responses:
+        '200':
+          description: Transitioned
+  /v1/governance/tools/{tool_id}/kill-switch:
+    post: &controlTransition
+      tags: [Governance Tools]
+      summary: Emergency kill-switch on a tool
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ToolIdParam' }
+      responses:
+        '200':
+          description: Control applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceControlResponse' }
+  /v1/governance/tools/{tool_id}/resume:
+    post: *controlTransition
+
+  /v1/governance/grants:
+    post:
+      tags: [Governance Delegations]
+      summary: Grant tool access to an agent version
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GrantToolRequest' }
+      responses:
+        '201':
+          description: Grant created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceGrantResponse' }
+  /v1/governance/grants/{grant_id}/revoke:
+    post:
+      tags: [Governance Delegations]
+      summary: Revoke a grant
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      responses:
+        '200':
+          description: Revoked
+  /v1/governance/agents/{agent_id}/grants:
+    get:
+      tags: [Governance Delegations]
+      summary: List an agent's grants
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      responses:
+        '200':
+          description: Grant list
+  /v1/governance/delegations:
+    post:
+      tags: [Governance Delegations]
+      summary: Mint a delegation token (returned exactly once)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MintDelegationRequest' }
+      responses:
+        '201':
+          description: Delegation minted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceDelegationResponse' }
+    get:
+      tags: [Governance Delegations]
+      summary: List delegation grants
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Grant list
+  /v1/governance/delegations/{grant_id}/revoke:
+    post:
+      tags: [Governance Delegations]
+      summary: Revoke a delegation grant (invalidates descendants)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      responses:
+        '200':
+          description: Revoked
+  /v1/governance/delegations/{grant_id}/chain:
+    get:
+      tags: [Governance Delegations]
+      summary: Verify and return a delegation chain (root first)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      responses:
+        '200':
+          description: Verified chain
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegationChain' }
+  /v1/governance/delegations/{grant_id}/chain/revoke:
+    post: &chainControl
+      tags: [Governance Delegations]
+      summary: Revoke a chain from this grant down
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      responses:
+        '200':
+          description: Chain control applied
+  /v1/governance/delegations/{grant_id}/chain/suspend:
+    post: *chainControl
+  /v1/governance/delegations/{grant_id}/chain/resume:
+    post: *chainControl
+
+  /v1/governance/runs:
+    post:
+      tags: [Governance Runs]
+      summary: Create a governed run bound to a delegation
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRunRequest' }
+      responses:
+        '201':
+          description: Run created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceRunResponse' }
+    get:
+      tags: [Governance Runs]
+      summary: List runs
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Run list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceRunListResponse' }
+  /v1/governance/runs/{run_id}:
+    get:
+      tags: [Governance Runs]
+      summary: Run detail with decisions
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: Run detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceRunDetailResponse' }
+  /v1/governance/runs/{run_id}/evaluate:
+    post:
+      tags: [Governance Runs]
+      summary: Evaluate one action against grants, budgets, controls, and SpiceDB
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvaluateActionRequest' }
+      responses:
+        '200':
+          description: Decision (allowed | denied | approval_required)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceEvaluateResponse' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/governance/runs/{run_id}/approve/{action_id}:
+    post: &approvalOp
+      tags: [Governance Runs]
+      summary: Approve a pending action (approver identity recorded)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+        - { $ref: '#/components/parameters/ActionIdParam' }
+      responses:
+        '200':
+          description: Approval recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceApprovalResponse' }
+  /v1/governance/runs/{run_id}/deny/{action_id}:
+    post: *approvalOp
+  /v1/governance/runs/{run_id}/terminate:
+    post:
+      tags: [Governance Runs]
+      summary: Terminate a run (no further evaluations)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: Terminated
+  /v1/governance/runs/{run_id}/timeline:
+    get:
+      tags: [Governance Evidence]
+      summary: Evidence timeline of a run
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: Timeline events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceTimelineResponse' }
+  /v1/governance/runs/{run_id}/delegation-chain:
+    get:
+      tags: [Governance Runs]
+      summary: Delegation chain behind a run
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: Verified chain
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DelegationChain' }
+  /v1/governance/dispatch:
+    post:
+      tags: [Governance Runs]
+      summary: Dispatch an allowed action through the connector gateway
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EvaluateActionRequest' }
+      responses:
+        '200':
+          description: Dispatch result (only after an allowed decision)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceDispatchResponse' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/governance/simulate:
+    post:
+      tags: [Governance Simulator]
+      summary: >-
+        Read-only policy simulation. Walks the same gate pipeline as
+        runtime evaluation (controls, delegation, agent/version,
+        permitted actions, tool/action, grant, budgets, SpiceDB,
+        approval) and explains every gate without writing evidence,
+        counters, or approvals.
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SimulateActionRequest' }
+      responses:
+        '200':
+          description: Simulated decision with per-gate checks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceSimulateResponse' }
+        '400':
+          description: Missing agent_id, tool_name, or action
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceError' }
+
+  /v1/governance/agents/{agent_id}/kill-switch:
+    post:
+      tags: [Governance Controls]
+      summary: Emergency kill-switch on an agent (all runs blocked)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      responses:
+        '200':
+          description: Control applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceControlResponse' }
+  /v1/governance/agents/{agent_id}/resume:
+    post: *controlTransition
+  /v1/governance/agent-versions/{version_id}/kill-switch:
+    post: *controlTransition
+  /v1/governance/agent-versions/{version_id}/resume:
+    post: *controlTransition
+  /v1/governance/agents/{agent_id}/activity:
+    get:
+      tags: [Governance Evidence]
+      summary: Agent activity stream
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/AgentIdParam' }
+      responses:
+        '200':
+          description: Activity events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceActivityResponse' }
+  /v1/governance/emergency-controls:
+    get:
+      tags: [Governance Controls]
+      summary: List active emergency controls
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Control list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceControlsResponse' }
+
+  /v1/governance/budgets:
+    post:
+      tags: [Governance Budgets]
+      summary: Upsert a budget policy (tenant/agent-version/grant scoped)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BudgetPolicyRequest' }
+      responses:
+        '200':
+          description: Budget upserted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceBudgetResponse' }
+    get:
+      tags: [Governance Budgets]
+      summary: List budget policies
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Budget list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceBudgetsResponse' }
+  /v1/governance/budgets/effective:
+    get:
+      tags: [Governance Budgets]
+      summary: Effective budget for the current run context
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Effective policy with usage counters
+
+  /v1/governance/evidence:
+    get:
+      tags: [Governance Evidence]
+      summary: Query evidence events
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/TraceIdQuery' }
+      responses:
+        '200':
+          description: Evidence events
+  /v1/governance/evidence/{evidence_id}:
+    get:
+      tags: [Governance Evidence]
+      summary: One evidence event
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/EvidenceIdParam' }
+      responses:
+        '200':
+          description: Evidence event
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceEvidenceEventResponse' }
+  /v1/governance/evidence/{evidence_id}/provenance:
+    get:
+      tags: [Governance Evidence]
+      summary: Full provenance of an evidence event (chain-verified)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/EvidenceIdParam' }
+      responses:
+        '200':
+          description: Provenance
+  /v1/governance/audit/verify:
+    get:
+      tags: [Governance Evidence]
+      summary: Verify the governance audit chains
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Verification result
+  /v1/governance/audit/checkpoints:
+    get:
+      tags: [Governance Evidence]
+      summary: List evidence checkpoints
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Checkpoints
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceCheckpointsResponse' }
+  /v1/governance/exports/{framework}:
+    get:
+      tags: [Governance Evidence]
+      summary: Evidence export for a regulatory framework
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/FrameworkParam' }
+      responses:
+        '200':
+          description: Export document
+
+  /v1/governance/outbox:
+    get:
+      tags: [Governance Outbox]
+      summary: List outbox events (pending/dead-lettered)
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Outbox events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceOutboxResponse' }
+  /v1/governance/outbox/{event_id}/retry:
+    post:
+      tags: [Governance Outbox]
+      summary: Re-queue an event for delivery
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/EventIdParam' }
+      responses:
+        '200':
+          description: Re-queued
+
+  /v1/governance/connectors:
+    post:
+      tags: [Connectors]
+      summary: Register a connector (tenant + region fail-closed)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConnectorRegisterRequest' }
+      responses:
+        '201':
+          description: Connector created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceConnectorDetailResponse' }
+    get:
+      tags: [Connectors]
+      summary: List connectors
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Connector list
+  /v1/governance/connectors/{connector_id}:
+    get:
+      tags: [Connectors]
+      summary: Connector detail with versions and lifecycle events
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConnectorIdParam' }
+      responses:
+        '200':
+          description: Connector detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceConnectorDetailResponse' }
+  /v1/governance/connectors/{connector_id}/manifest:
+    get:
+      tags: [Connectors]
+      summary: Connector action manifest (tools the connector exposes)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConnectorIdParam' }
+      responses:
+        '200':
+          description: Manifest
+  /v1/governance/connectors/{connector_id}/activate:
+    post: &connectorTransition
+      tags: [Connectors]
+      summary: Activate a connector
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConnectorIdParam' }
+      responses:
+        '200':
+          description: Transitioned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceConnectorTransitionResponse' }
+  /v1/governance/connectors/{connector_id}/suspend:
+    post: *connectorTransition
+  /v1/governance/connectors/{connector_id}/revoke:
+    post: *connectorTransition
+  /v1/governance/connectors/{connector_id}/config:
+    post:
+      tags: [Connectors]
+      summary: Update connector config (new immutable version + digest)
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConnectorIdParam' }
+      responses:
+        '200':
+          description: Config updated
+  /v1/governance/connectors/{connector_id}/health:
+    get:
+      tags: [Connectors]
+      summary: Credential-free health probe of the connector
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConnectorIdParam' }
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GovernanceConnectorHealthResponse' }
+
+  /v1/governance/trust-relationships:
+    post:
+      tags: [Trust & External Agents]
+      summary: Propose a trust relationship (parent/child or parent/external)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTrustRelationshipRequest' }
+      responses:
+        '201':
+          description: Relationship proposed
+    get:
+      tags: [Trust & External Agents]
+      summary: List trust relationships
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Relationship list
+  /v1/governance/trust-relationships/{relationship_id}:
+    get:
+      tags: [Trust & External Agents]
+      summary: Trust relationship detail
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RelationshipIdParam' }
+      responses:
+        '200':
+          description: Relationship detail
+  /v1/governance/trust-relationships/{relationship_id}/approve:
+    post: &trustTransition
+      tags: [Trust & External Agents]
+      summary: Approve a pending relationship
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RelationshipIdParam' }
+      responses:
+        '200':
+          description: Transitioned
+  /v1/governance/trust-relationships/{relationship_id}/activate:
+    post: *trustTransition
+  /v1/governance/trust-relationships/{relationship_id}/suspend:
+    post: *trustTransition
+  /v1/governance/trust-relationships/{relationship_id}/resume:
+    post: *trustTransition
+  /v1/governance/trust-relationships/{relationship_id}/revoke:
+    post: *trustTransition
+
+  /v1/governance/external-agents:
+    post:
+      tags: [Trust & External Agents]
+      summary: Register an external agent (issuer-verified)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateExternalAgentRequest' }
+      responses:
+        '201':
+          description: External agent created
+    get:
+      tags: [Trust & External Agents]
+      summary: List external agents
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: External agent list
+  /v1/governance/external-agents/{external_agent_id}:
+    get:
+      tags: [Trust & External Agents]
+      summary: External agent detail
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ExternalAgentIdParam' }
+      responses:
+        '200':
+          description: External agent detail
+  /v1/governance/external-agents/{external_agent_id}/health:
+    get:
+      tags: [Trust & External Agents]
+      summary: Credential-free external agent health probe
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ExternalAgentIdParam' }
+      responses:
+        '200':
+          description: Health status
+  /v1/governance/external-agents/{external_agent_id}/activate:
+    post: &externalAgentTransition
+      tags: [Trust & External Agents]
+      summary: Activate an external agent
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ExternalAgentIdParam' }
+      responses:
+        '200':
+          description: Transitioned
+  /v1/governance/external-agents/{external_agent_id}/suspend:
+    post: *externalAgentTransition
+  /v1/governance/external-agents/{external_agent_id}/revoke:
+    post: *externalAgentTransition
+
+  /v1/governance/external-runs:
+    post:
+      tags: [Trust & External Agents]
+      summary: Create an external-agent run (external token + delegation token)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateExternalRunRequest' }
+      responses:
+        '201':
+          description: External run created
+    get:
+      tags: [Trust & External Agents]
+      summary: List external runs
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: External run list
+  /v1/governance/external-runs/{run_id}:
+    get:
+      tags: [Trust & External Agents]
+      summary: External run detail
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: External run detail
+  /v1/governance/external-runs/{run_id}/terminate:
+    post:
+      tags: [Trust & External Agents]
+      summary: Terminate an external run
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/RunIdParam' }
+      responses:
+        '200':
+          description: Terminated
+
+  /v1/governance/consents:
+    post:
+      tags: [Trust & External Agents]
+      summary: Record a consent (customer, purpose, resource pattern)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateConsentRequest' }
+      responses:
+        '201':
+          description: Consent recorded
+    get:
+      tags: [Trust & External Agents]
+      summary: List consent records
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Consent list
+  /v1/governance/consents/{consent_id}:
+    get:
+      tags: [Trust & External Agents]
+      summary: Consent detail
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConsentIdParam' }
+      responses:
+        '200':
+          description: Consent detail
+  /v1/governance/consents/{consent_id}/revoke:
+    post:
+      tags: [Trust & External Agents]
+      summary: Revoke a consent
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ConsentIdParam' }
+      responses:
+        '200':
+          description: Revoked
+
+  /v1/governance/transfer-policies:
+    post:
+      tags: [Trust & External Agents]
+      summary: Upsert a transfer policy (source/target region + purpose)
+      security: [{ apiKeyAuth: [governance] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertTransferPolicyRequest' }
+      responses:
+        '200':
+          description: Policy upserted
+    get:
+      tags: [Trust & External Agents]
+      summary: List transfer policies
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: Policy list
+  /v1/governance/transfer-policies/{policy_id}/activate:
+    post: &transferTransition
+      tags: [Trust & External Agents]
+      summary: Activate a transfer policy
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/PolicyIdParam' }
+      responses:
+        '200':
+          description: Transitioned
+  /v1/governance/transfer-policies/{policy_id}/suspend:
+    post: *transferTransition
+  /v1/governance/transfer-policies/{policy_id}/revoke:
+    post: *transferTransition
+
+  /v1/governance/external-budgets:
+    get:
+      tags: [Governance Budgets]
+      summary: List external agent budgets
+      security: [{ apiKeyAuth: [governance] }]
+      responses:
+        '200':
+          description: External budget list
+  /v1/governance/external-budgets/{external_agent_id}:
+    put:
+      tags: [Governance Budgets]
+      summary: Upsert an external agent budget
+      security: [{ apiKeyAuth: [governance] }]
+      parameters:
+        - { $ref: '#/components/parameters/ExternalAgentIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertExternalBudgetRequest' }
+      responses:
+        '200':
+          description: Budget upserted
+
+  /v1/usage:
+    get:
+      tags: [Usage]
+      summary: Read the tenant's current usage snapshot (counts and limits per metric)
+      security: [{ apiKeyAuth: [usage] }]
+      responses:
+        '200':
+          description: Usage snapshot for the tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageResponse' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Usage metering is not configured
+  /v1/usage/limits:
+    get:
+      tags: [Usage]
+      summary: Read the tenant's configured usage limits
+      security: [{ apiKeyAuth: [usage] }]
+      responses:
+        '200':
+          description: Configured limits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageLimitsResponse' }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Usage metering is not configured
+    put:
+      tags: [Usage]
+      summary: Set usage limits for the tenant (limit <= 0 clears the limit)
+      security: [{ apiKeyAuth: [usage] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKeyHeader' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutUsageLimitsRequest' }
+      responses:
+        '200':
+          description: Updated limits
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageLimitsResponse' }
+        '400':
+          description: Invalid metric, period, or limit value
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: Usage metering is not configured
+
+  /v1/security/break-glass/grants:
+    post:
+      tags: [Security]
+      summary: >-
+        Open a time-bounded break-glass grant. Mints a short-lived
+        admin-scoped API key (returned once, never persisted) with
+        hash-chained 'opened' evidence
+      security: [{ apiKeyAuth: [break_glass] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OpenBreakGlassRequest' }
+      responses:
+        '201':
+          description: Grant opened; the minted key is in the response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenBreakGlassResponse' }
+        '400':
+          description: reason_required, invalid duration, or over BREAK_GLASS_MAX_MINUTES
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          description: break_glass_unavailable (service not wired)
+    get:
+      tags: [Security]
+      summary: List the tenant's break-glass grants (lazily expiring overdue ones)
+      security: [{ apiKeyAuth: [break_glass] }]
+      responses:
+        '200':
+          description: Grants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassListResponse' }
+        '503':
+          description: break_glass_unavailable (service not wired)
+  /v1/security/break-glass/grants/{id}:
+    get:
+      tags: [Security]
+      summary: One break-glass grant with its hash-chained event log
+      security: [{ apiKeyAuth: [break_glass] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      responses:
+        '200':
+          description: Grant + events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassGetResponse' }
+        '404':
+          description: break_glass_grant_not_found
+        '503':
+          description: break_glass_unavailable (service not wired)
+  /v1/security/break-glass/grants/{id}/revoke:
+    post:
+      tags: [Security]
+      summary: >-
+        Revoke an active break-glass grant early. Revokes the bound API
+        key immediately and appends hash-chained 'revoked' evidence
+      security: [{ apiKeyAuth: [break_glass] }]
+      parameters:
+        - { $ref: '#/components/parameters/GrantIdParam' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeBreakGlassRequest' }
+      responses:
+        '200':
+          description: Grant revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BreakGlassGrant' }
+        '400':
+          description: reason_required
+        '404':
+          description: break_glass_grant_not_found
+        '409':
+          description: break_glass_grant_not_active (already revoked or expired)
+        '503':
+          description: break_glass_unavailable (service not wired)
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Groundwork-API-Key
+      description: API key with scopes (admin | query | agents | audit | governance | usage | provision | key_admin | break_glass)
+  parameters:
+    IdParam:            { name: id, in: path, required: true, schema: { type: string } }
+    GrantIdParam:       { name: id, in: path, required: true, schema: { type: string }, description: Break-glass grant id (UUID in Postgres) }
+    AgentIdParam:       { name: agent_id, in: path, required: true, schema: { type: string } }
+    ToolIdParam:        { name: tool_id, in: path, required: true, schema: { type: string } }
+    GrantIdParam:       { name: grant_id, in: path, required: true, schema: { type: string } }
+    RunIdParam:         { name: run_id, in: path, required: true, schema: { type: string } }
+    ActionIdParam:      { name: action_id, in: path, required: true, schema: { type: string } }
+    EvidenceIdParam:    { name: evidence_id, in: path, required: true, schema: { type: string } }
+    EventIdParam:       { name: event_id, in: path, required: true, schema: { type: string } }
+    ConnectorIdParam:   { name: connector_id, in: path, required: true, schema: { type: string } }
+    RelationshipIdParam: { name: relationship_id, in: path, required: true, schema: { type: string } }
+    ExternalAgentIdParam: { name: external_agent_id, in: path, required: true, schema: { type: string } }
+    ConsentIdParam:     { name: consent_id, in: path, required: true, schema: { type: string } }
+    PolicyIdParam:      { name: policy_id, in: path, required: true, schema: { type: string } }
+    IdempotencyKeyHeader: { name: Idempotency-Key, in: header, required: true, schema: { type: string }, description: Client-supplied idempotency key (mutations) }
+    FrameworkParam:     { name: framework, in: path, required: true, schema: { type: string }, description: EU_AI_ACT | DORA | GDPR | ISO_42001 | NIST_AI_RMF }
+    TraceIdParam:       { name: trace_id, in: path, required: true, schema: { type: string } }
+    TraceIdQuery:       { name: trace_id, in: query, schema: { type: string } }
+    AgentKeyIdQuery:    { name: agent_key_id, in: query, schema: { type: string } }
+    LimitQuery:         { name: limit, in: query, schema: { type: integer, maximum: 100, default: 50 } }
+    CursorQuery:        { name: cursor, in: query, schema: { type: string } }
+  responses:
+    Unauthenticated:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Insufficient scope or quota exceeded (quota_exceeded:<metric>)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: >-
+        Per-tenant rate limit exceeded (rate_limit_exceeded). The request
+        was rejected before execution; honor the Retry-After header
+        (seconds until the fixed window resets).
+      headers:
+        Retry-After:
+          description: Seconds until the tenant's rate-limit window resets
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: >-
+        concurrency_limit_exceeded — the tenant's concurrent-request
+        limit is saturated (or another backend dependency failed).
+        Retry after the in-flight requests complete.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable error code (e.g. agent_not_found, budget_exceeded)
+    GovernanceError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable governance error code (e.g. action_simulate_failed)
+    StatusResponse:
+      type: object
+      properties:
+        status: { type: string }
+        service: { type: string }
+    QueryRequest:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string }
+        top_k: { type: integer, default: 10 }
+    QueryResponse:
+      type: object
+      properties:
+        answer: { type: string }
+        citations: { type: array, items: { type: object } }
+        decisions: { type: array, items: { $ref: '#/components/schemas/ActionDecision' } }
+    CreateAPIKeyRequest:
+      type: object
+      required: [tenant_id, scopes]
+      properties:
+        tenant_id: { type: string }
+        scopes: { type: array, items: { type: string } }
+        rate_limit_rpm: { type: integer }
+        owner_principal_id: { type: string }
+        expires_at:
+          type: string
+          format: date-time
+          description: >-
+            Hard expiry for the key (RFC3339 UTC). Zero/omitted = never
+            expires. An expired key fails closed at the auth layer with
+            401 api_key_expired on its next use — this is how break-glass
+            grants self-expire.
+    BreakGlassGrant:
+      type: object
+      required: [id, tenant_id, status, expires_at, immutable_digest]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        operator_principal_id: { type: string }
+        reason: { type: string }
+        duration_minutes: { type: integer }
+        key_id: { type: integer }
+        key_prefix: { type: string }
+        status: { type: string, enum: [active, expired, revoked] }
+        expires_at: { type: string, format: date-time }
+        requested_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string }
+        revocation_reason: { type: string }
+        immutable_digest: { type: string }
+        created_at: { type: string, format: date-time }
+    BreakGlassEvent:
+      type: object
+      required: [id, grant_id, event_type, immutable_digest, previous_hash]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        grant_id: { type: string }
+        event_type: { type: string, enum: [opened, expired, revoked] }
+        actor_principal_id: { type: string }
+        reason: { type: string }
+        duration_minutes: { type: integer }
+        key_id: { type: integer }
+        expires_at: { type: string, format: date-time }
+        immutable_digest: { type: string }
+        previous_hash: { type: string }
+        created_at: { type: string, format: date-time }
+    OpenBreakGlassRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, description: Mandatory accountable rationale }
+        duration_minutes:
+          type: integer
+          minimum: 1
+          description: Capped by BREAK_GLASS_MAX_MINUTES (default 60)
+    RevokeBreakGlassRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, description: Mandatory accountable rationale }
+    OpenBreakGlassResponse:
+      type: object
+      required: [grant, key]
+      properties:
+        grant: { $ref: '#/components/schemas/BreakGlassGrant' }
+        key:
+          type: string
+          description: >-
+            The minted short-lived admin-scoped API key. Returned exactly
+            once — it is never persisted, so losing it requires opening
+            a new grant.
+    BreakGlassListResponse:
+      type: object
+      required: [grants]
+      properties:
+        grants: { type: array, items: { $ref: '#/components/schemas/BreakGlassGrant' } }
+    BreakGlassGetResponse:
+      type: object
+      required: [grant, events]
+      properties:
+        grant: { $ref: '#/components/schemas/BreakGlassGrant' }
+        events: { type: array, items: { $ref: '#/components/schemas/BreakGlassEvent' } }
+    AuditListResponse:
+      type: object
+      properties:
+        entries: { type: array, items: { type: object } }
+        next_cursor: { type: string }
+    AuditVerifyResponse:
+      type: object
+      properties:
+        tenant: { type: string }
+        entries: { type: integer }
+        problems: { type: array, items: { type: object } }
+        ok: { type: boolean }
+    SyncResult:
+      type: object
+      properties:
+        synced: { type: integer }
+        failed: { type: integer }
+        problems: { type: array, items: { type: object } }
+    CreateAgentRequest:
+      type: object
+      required: [name, purpose]
+      properties:
+        name: { type: string }
+        purpose: { type: string }
+        owner_principal_id: { type: string }
+        environment: { type: string, enum: [development, staging, production] }
+        risk_tier: { type: string, enum: [low, medium, high, critical] }
+    AddAgentVersionRequest:
+      type: object
+      required: [version, digest]
+      properties:
+        version: { type: string }
+        digest: { type: string }
+        source_ref: { type: string }
+    AgentResponse:
+      type: object
+      properties:
+        agent: { $ref: '#/components/schemas/Agent' }
+    AgentListResponse:
+      type: object
+      properties:
+        agents: { type: array, items: { $ref: '#/components/schemas/Agent' } }
+        count: { type: integer }
+    AgentDetailResponse:
+      type: object
+      properties:
+        agent: { $ref: '#/components/schemas/Agent' }
+        versions: { type: array, items: { $ref: '#/components/schemas/AgentVersion' } }
+        lifecycle_events: { type: array, items: { $ref: '#/components/schemas/LifecycleEvent' } }
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        purpose: { type: string }
+        owner_principal_id: { type: string }
+        lifecycle_state: { type: string }
+        environment: { type: string }
+        risk_tier: { type: string }
+    AgentVersion:
+      type: object
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        version: { type: string }
+        digest: { type: string }
+        status: { type: string }
+    LifecycleEvent:
+      type: object
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        action: { type: string }
+        actor_principal_id: { type: string }
+        immutable_digest: { type: string }
+        created_at: { type: string, format: date-time }
+    RegisterToolRequest:
+      type: object
+      required: [name, transport, owner_principal_id, region]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        transport: { type: string, enum: [http, mcp, builtin, internal] }
+        endpoint_or_server: { type: string }
+        owner_principal_id: { type: string }
+        region: { type: string }
+        manifest_digest: { type: string }
+    RegisterToolActionRequest:
+      type: object
+      required: [action, resource_type, risk_level, read_only]
+      properties:
+        action: { type: string }
+        resource_type: { type: string }
+        risk_level: { type: string, enum: [low, medium, high, critical] }
+        read_only: { type: boolean }
+        requires_human_approval: { type: boolean }
+    TransitionToolRequest:
+      type: object
+      required: [lifecycle]
+      properties:
+        lifecycle: { type: string, enum: [active, suspended, revoked] }
+        reason: { type: string }
+    GrantToolRequest:
+      type: object
+      required: [agent_id, version_id, tool_id, action_id, resource_scope]
+      properties:
+        agent_id: { type: string }
+        version_id: { type: string }
+        tool_id: { type: string }
+        action_id: { type: string }
+        resource_scope: { type: string }
+        region_constraint: { type: string }
+        call_limit_per_run: { type: integer }
+        requires_approval: { type: boolean }
+    MintDelegationRequest:
+      type: object
+      required: [subject_principal_id, purpose, permitted_actions]
+      properties:
+        subject_principal_id: { type: string }
+        purpose: { type: string }
+        permitted_actions: { type: array, items: { type: string }, description: tool:action entries }
+        ttl_seconds: { type: integer }
+    MintDelegationResponse:
+      type: object
+      properties:
+        grant: { $ref: '#/components/schemas/DelegationGrant' }
+        token: { type: string, description: returned exactly once at mint time }
+    GovernanceToolResponse:
+      type: object
+      properties:
+        tool: { $ref: '#/components/schemas/Tool' }
+    GovernanceToolListResponse:
+      type: object
+      properties:
+        tools: { type: array, items: { $ref: '#/components/schemas/Tool' } }
+        count: { type: integer }
+    Tool:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        transport: { type: string }
+        endpoint_or_server: { type: string }
+        owner_principal_id: { type: string }
+        region: { type: string }
+        lifecycle: { type: string }
+        created_at: { type: string, format: date-time }
+    GovernanceGrantResponse:
+      type: object
+      properties:
+        grant: { $ref: '#/components/schemas/AgentToolGrant' }
+    AgentToolGrant:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        agent_id: { type: string }
+        version_id: { type: string }
+        tool_id: { type: string }
+        action_id: { type: string }
+        resource_scope: { type: string }
+        region_constraint: { type: string }
+        call_limit_per_run: { type: integer }
+        requires_approval: { type: boolean }
+        granted_by: { type: string }
+        granted_at: { type: string, format: date-time }
+    GovernanceDelegationResponse:
+      type: object
+      properties:
+        grant: { $ref: '#/components/schemas/DelegationGrant' }
+        token: { type: string }
+    DelegationGrant:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        agent_id: { type: string }
+        purpose: { type: string }
+        region: { type: string }
+        permitted_actions: { type: array, items: { type: string } }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        is_agent_delegation: { type: boolean }
+        parent_grant_id: { type: string }
+        root_grant_id: { type: string }
+        delegation_depth: { type: integer }
+        immutable_digest: { type: string }
+    DelegationChainNode:
+      type: object
+      properties:
+        grant: { $ref: '#/components/schemas/DelegationGrant' }
+        delegator_agent_id: { type: string }
+        delegatee_agent_id: { type: string }
+        verified: { type: boolean }
+        problem: { type: string }
+    DelegationChain:
+      type: object
+      properties:
+        root_grant_id: { type: string }
+        leaf_grant_id: { type: string }
+        depth: { type: integer }
+        verified: { type: boolean }
+        problem: { type: string }
+        nodes: { type: array, items: { $ref: '#/components/schemas/DelegationChainNode' } }
+    CreateRunRequest:
+      type: object
+      required: [idempotency_key]
+      properties:
+        delegation_token: { type: string }
+        idempotency_key: { type: string }
+        actions: { type: array, items: { $ref: '#/components/schemas/RunActionRequest' } }
+        external_token: { type: string }
+    RunActionRequest:
+      type: object
+      required: [tool_action, resource_ref]
+      properties:
+        tool_action: { type: string, description: tool:action }
+        resource_ref: { type: string }
+        parameters: { type: object }
+    GovernanceRunResponse:
+      type: object
+      properties:
+        run: { $ref: '#/components/schemas/AgentRun' }
+    GovernanceRunListResponse:
+      type: object
+      properties:
+        runs: { type: array, items: { $ref: '#/components/schemas/AgentRun' } }
+        count: { type: integer }
+    GovernanceRunDetailResponse:
+      type: object
+      properties:
+        run: { $ref: '#/components/schemas/AgentRun' }
+        decisions: { type: array, items: { $ref: '#/components/schemas/ActionDecision' } }
+    AgentRun:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        agent_id: { type: string }
+        delegation_grant_id: { type: string }
+        status: { type: string }
+        region: { type: string }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+    EvaluateActionRequest:
+      type: object
+      required: [tool_action, resource_ref]
+      properties:
+        tool_action: { type: string }
+        resource_ref: { type: string }
+        parameters: { type: object }
+    GovernanceEvaluateResponse:
+      type: object
+      properties:
+        decision: { $ref: '#/components/schemas/ActionDecision' }
+        allowed: { type: boolean }
+    ActionDecision:
+      type: object
+      properties:
+        run_id: { type: string }
+        action_id: { type: string }
+        tool_action: { type: string }
+        resource_ref: { type: string }
+        allowed: { type: boolean }
+        status: { type: string, enum: [allowed, denied, approval_required] }
+        reason: { type: string }
+        reason_code: { type: string }
+        requires_approval: { type: boolean }
+        evidence: { type: array, items: { type: object } }
+        immutable_digest: { type: string }
+    GovernanceApprovalResponse:
+      type: object
+      properties:
+        approval: { $ref: '#/components/schemas/ActionApproval' }
+    ActionApproval:
+      type: object
+      properties:
+        run_id: { type: string }
+        action_id: { type: string }
+        approver_principal_id: { type: string }
+        decision: { type: string }
+        reason: { type: string }
+        immutable_digest: { type: string }
+    GovernanceDispatchResponse:
+      type: object
+      properties:
+        decision: { $ref: '#/components/schemas/ActionDecision' }
+        result: { type: object, description: connector dispatch result with redacted response }
+    SimulateActionRequest:
+      type: object
+      description: >-
+        Read-only analysis input. Tenant and region always come from the
+        API-key context, never from the body. No delegation token is
+        accepted; the delegation gates are reported as skipped.
+      required: [agent_id, tool_name, action, resource_ref]
+      properties:
+        agent_id: { type: string }
+        version_id: { type: string, description: defaults to the agent's active version }
+        tool_name: { type: string }
+        action: { type: string }
+        resource_ref: { type: string }
+        principal_id: { type: string, description: optional; enables the SpiceDB relationship gate }
+    GateCheck:
+      type: object
+      properties:
+        gate: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [passed, failed, skipped, unavailable, required] }
+        detail: { type: string }
+        reason_code: { type: string }
+    SimulateActionResponse:
+      type: object
+      properties:
+        decision: { type: string, enum: [allowed, denied, approval_required, fail_closed] }
+        allowed: { type: boolean }
+        reason: { type: string }
+        reason_code: { type: string }
+        checks: { type: array, items: { $ref: '#/components/schemas/GateCheck' } }
+        simulated: { type: boolean, description: always true; analysis is never an authoritative decision }
+        simulated_at: { type: string, format: date-time }
+    GovernanceSimulateResponse:
+      type: object
+      properties:
+        simulation: { $ref: '#/components/schemas/SimulateActionResponse' }
+    GovernanceControlResponse:
+      type: object
+      properties:
+        control: { $ref: '#/components/schemas/EmergencyControl' }
+    GovernanceControlsResponse:
+      type: object
+      properties:
+        controls: { type: array, items: { $ref: '#/components/schemas/EmergencyControl' } }
+    EmergencyControl:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        control_state: { type: string }
+        reason: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+    BudgetPolicyRequest:
+      type: object
+      properties:
+        scope_type: { type: string, enum: [tenant, agent_version, grant] }
+        agent_version_id: { type: string }
+        grant_id: { type: string }
+        max_actions_per_run: { type: integer }
+        max_denied_per_run: { type: integer }
+        max_approval_required_per_run: { type: integer }
+        max_tool_calls_per_action_per_run: { type: integer }
+        max_run_duration_seconds: { type: integer }
+        max_citations_per_query: { type: integer }
+    GovernanceBudgetResponse:
+      type: object
+      properties:
+        budget: { $ref: '#/components/schemas/BudgetPolicy' }
+    GovernanceBudgetsResponse:
+      type: object
+      properties:
+        budgets: { type: array, items: { $ref: '#/components/schemas/BudgetPolicy' } }
+    BudgetPolicy:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        scope_type: { type: string }
+        agent_version_id: { type: string }
+        grant_id: { type: string }
+        max_actions_per_run: { type: integer }
+        max_denied_per_run: { type: integer }
+        max_approval_required_per_run: { type: integer }
+        max_tool_calls_per_action_per_run: { type: integer }
+        max_run_duration_seconds: { type: integer }
+        max_citations_per_query: { type: integer }
+        created_at: { type: string, format: date-time }
+    GovernanceEvidenceEventResponse:
+      type: object
+      properties:
+        event: { $ref: '#/components/schemas/EvidenceEvent' }
+    EvidenceEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        event_type: { type: string }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        actor_principal_id: { type: string }
+        trace_id: { type: string }
+        immutable_digest: { type: string }
+        occurred_at: { type: string, format: date-time }
+    GovernanceTimelineResponse:
+      type: object
+      properties:
+        events: { type: array, items: { $ref: '#/components/schemas/EvidenceEvent' } }
+    GovernanceActivityResponse:
+      type: object
+      properties:
+        events: { type: array, items: { $ref: '#/components/schemas/EvidenceEvent' } }
+    GovernanceCheckpointsResponse:
+      type: object
+      properties:
+        checkpoints: { type: array, items: { type: object } }
+    GovernanceOutboxResponse:
+      type: object
+      properties:
+        events: { type: array, items: { $ref: '#/components/schemas/OutboxEvent' } }
+    OutboxEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        event_type: { type: string }
+        status: { type: string, enum: [pending, delivering, delivered, dead_lettered] }
+        attempts: { type: integer }
+        next_attempt_at: { type: string, format: date-time }
+        occurred_at: { type: string, format: date-time }
+    ConnectorRegisterRequest:
+      type: object
+      required: [name, type, config, actions]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [rest, mcp] }
+        config: { $ref: '#/components/schemas/ConnectorConfig' }
+        actions: { type: array, items: { $ref: '#/components/schemas/ConnectorActionManifest' } }
+        description: { type: string }
+    ConnectorConfig:
+      type: object
+      required: [base_url, region]
+      properties:
+        base_url: { type: string, description: must be on the registered egress allowlist in production }
+        region: { type: string, description: must be a provisioned tenant region }
+        timeout_ms: { type: integer }
+        retry_max: { type: integer }
+        retry_idempotent_only: { type: boolean }
+        max_response_bytes: { type: integer }
+        tls_verify: { type: boolean }
+        secret_ref: { type: string, description: env://NAME or keyring://PURPOSE reference only }
+        client_cert_ref: { type: string }
+        allowed_content_types: { type: array, items: { type: string } }
+        redaction_fields: { type: array, items: { type: string } }
+    ConnectorActionManifest:
+      type: object
+      required: [name, transport_method, risk]
+      properties:
+        name: { type: string }
+        transport_method: { type: string, description: HTTP method (rest) or MCP tool name (mcp) }
+        path_template:
+          type: string
+          description: "REST only: /path/{arg} — never raw agent URLs"
+        resource_type: { type: string }
+        risk: { type: string }
+        read_only: { type: boolean }
+        requires_approval: { type: boolean }
+        max_request_bytes: { type: integer }
+        max_response_bytes: { type: integer }
+        allowed_agent_version_ids: { type: array, items: { type: string } }
+        args: { type: array, items: { type: string }, description: allowlisted argument names }
+    GovernanceConnectorsResponse:
+      type: object
+      properties:
+        connectors: { type: array, items: { $ref: '#/components/schemas/Connector' } }
+        count: { type: integer }
+    GovernanceConnectorDetailResponse:
+      type: object
+      properties:
+        connector: { $ref: '#/components/schemas/Connector' }
+        versions: { type: array, items: { $ref: '#/components/schemas/ConnectorVersion' } }
+        events: { type: array, items: { $ref: '#/components/schemas/ConnectorLifecycleEvent' } }
+    GovernanceConnectorTransitionResponse:
+      type: object
+      properties:
+        connector: { $ref: '#/components/schemas/Connector' }
+    GovernanceConnectorHealthResponse:
+      type: object
+      properties:
+        healthy: { type: boolean }
+        latency_ms: { type: integer }
+        detail: { type: string }
+    Connector:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        transport: { type: string }
+        base_url: { type: string }
+        region: { type: string }
+        lifecycle: { type: string }
+        created_at: { type: string, format: date-time }
+    ConnectorVersion:
+      type: object
+      properties:
+        id: { type: string }
+        connector_id: { type: string }
+        version_number: { type: integer }
+        manifest_digest: { type: string }
+        config: { type: object }
+    ConnectorLifecycleEvent:
+      type: object
+      properties:
+        id: { type: string }
+        connector_id: { type: string }
+        action_type: { type: string }
+        actor_principal_id: { type: string }
+        occurred_at: { type: string, format: date-time }
+    CreateTrustRelationshipRequest:
+      type: object
+      required: [parent_agent_id, purpose, max_delegation_depth, region]
+      properties:
+        parent_agent_id: { type: string }
+        child_agent_id: { type: string }
+        external_agent_id: { type: string }
+        trust_domain: { type: string }
+        purpose: { type: string }
+        max_delegation_depth: { type: integer, maximum: 4 }
+        allowed_tools_actions: { type: array, items: { type: string }, description: empty = parent's whole scope }
+        region: { type: string }
+        expires_at: { type: string, format: date-time }
+        approval_required: { type: boolean }
+    CreateExternalAgentRequest:
+      type: object
+      required: [external_agent_id, agent_id, organization_id, verified_issuer, auth_method, trust_tier, region]
+      properties:
+        external_agent_id: { type: string }
+        agent_id: { type: string }
+        organization_id: { type: string }
+        verified_issuer: { type: string }
+        allowed_audiences: { type: array, items: { type: string } }
+        auth_method: { type: string, enum: [oidc_jwks, mtls] }
+        trust_tier: { type: string }
+        region: { type: string }
+        allowed_tools_actions: { type: array, items: { type: string } }
+        public_key_jwks_ref: { type: string }
+        security_contact: { type: string }
+        ttl_seconds: { type: integer }
+    CreateExternalRunRequest:
+      type: object
+      required: [external_token, delegation_token, actions]
+      properties:
+        external_token: { type: string }
+        delegation_token: { type: string }
+        actions: { type: array, items: { $ref: '#/components/schemas/RunActionRequest' } }
+    CreateConsentRequest:
+      type: object
+      required: [organization_id, external_agent_id, customer_principal_id, purpose]
+      properties:
+        organization_id: { type: string }
+        external_agent_id: { type: string }
+        customer_principal_id: { type: string }
+        purpose: { type: string }
+        resource_ref_pattern: { type: string }
+        ttl_seconds: { type: integer }
+    UpsertTransferPolicyRequest:
+      type: object
+      required: [source_region, target_region, purpose_pattern]
+      properties:
+        source_region: { type: string }
+        target_region: { type: string }
+        purpose_pattern:
+          type: string
+          description: "'*' or exact purpose"
+        enabled: { type: boolean }
+    UpsertExternalBudgetRequest:
+      type: object
+      required: [max_total_actions, max_actions_per_run]
+      properties:
+        max_total_actions: { type: integer }
+        max_actions_per_run: { type: integer }
+        max_denied_per_run: { type: integer }
+        max_approval_required_per_run: { type: integer }
+        max_tool_calls_per_action_per_run: { type: integer }
+    UsageMetric:
+      type: string
+      enum: [agents, runs, decisions, connector_calls, exports, outbox_deliveries, storage_bytes]
+    UsagePeriod:
+      type: string
+      enum: [monthly, lifetime]
+    UsageLimit:
+      type: object
+      required: [metric, period, limit]
+      properties:
+        metric: { $ref: '#/components/schemas/UsageMetric' }
+        period: { $ref: '#/components/schemas/UsagePeriod' }
+        limit:
+          type: integer
+          description: 'Quota for the period; <= 0 clears the limit (unlimited)'
+    MetricUsage:
+      type: object
+      required: [metric, period, count, limit, remaining]
+      properties:
+        metric: { $ref: '#/components/schemas/UsageMetric' }
+        period: { $ref: '#/components/schemas/UsagePeriod' }
+        count: { type: integer, description: Recorded usage for the period (UTC calendar month for monthly) }
+        limit: { type: integer, description: 0 when unlimited }
+        remaining: { type: integer, description: -1 when unlimited }
+    UsageResponse:
+      type: object
+      required: [tenant_id, period, usage]
+      properties:
+        tenant_id: { type: string }
+        period: { type: string, description: Snapshot period in the form YYYY-MM (UTC) }
+        usage:
+          type: array
+          items: { $ref: '#/components/schemas/MetricUsage' }
+    UsageLimitsResponse:
+      type: object
+      required: [tenant_id, limits]
+      properties:
+        tenant_id: { type: string }
+        limits:
+          type: array
+          items: { $ref: '#/components/schemas/UsageLimit' }
+    PutUsageLimitsRequest:
+      type: object
+      required: [limits]
+      properties:
+        limits:
+          type: array
+          items: { $ref: '#/components/schemas/UsageLimit' }

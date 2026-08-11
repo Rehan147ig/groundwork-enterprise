@@ -1,0 +1,32 @@
+{
+  "name": "groundwork",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Groundwork — enterprise governance layer for agentic AI: fail-closed authorization, immutable audit, and governed retrieval across Qdrant, Elasticsearch, and SpiceDB.",
+  "type": "module",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=18.17.0",
+    "npm": ">=9.6.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:ingestion": "python -m unittest discover services/ingestion/tests",
+    "test:runtime": "go test ./...",
+    "check": "turbo run lint typecheck test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  }
+}

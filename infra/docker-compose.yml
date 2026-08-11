@@ -1,0 +1,182 @@
+services:
+  console:
+    build:
+      context: ..
+      dockerfile: apps/console/Dockerfile
+    environment:
+      QUERY_RUNTIME_URL: http://query-runtime:8080
+      INGESTION_RUNTIME_URL: http://ingestion:8000
+      NEXT_PUBLIC_APP_NAME: Groundwork
+    ports:
+      - "3000:3000"
+    depends_on:
+      - query-runtime
+      - ingestion
+
+  query-runtime:
+    build:
+      context: ../services/query-runtime
+    environment:
+      QUERY_RUNTIME_ADDR: ":8080"
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: groundwork_chunks
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: groundwork_chunks
+      EMBEDDING_URL: http://ingestion:8000
+      QUERY_TIMEOUT_MS: "15000"
+      ACL_TIMEOUT_MS: "500"
+      BACKEND_HTTP_TIMEOUT_MS: "15000"
+      EMBEDDING_TIMEOUT_MS: "15000"
+      QDRANT_TIMEOUT_MS: "15000"
+      QDRANT_CIRCUIT_FAILURE_LIMIT: "3"
+      QDRANT_CIRCUIT_OPEN_TIMEOUT_MS: "10000"
+      QDRANT_CIRCUIT_HALF_OPEN_LIMIT: "1"
+      SPICEDB_ENDPOINT: http://spicedb:50051
+      SPICEDB_TOKEN: groundwork-local
+      SPICEDB_INSECURE_PLAINTEXT: "true"
+      DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
+      BOOTSTRAP_API_KEY: gw_local_acme_key
+      BOOTSTRAP_TENANT_ID: acme
+      BOOTSTRAP_TENANT_REGION: US
+      IDK_THRESHOLD: "0.70"
+      VECTOR_WEIGHT: "0.60"
+      KEYWORD_WEIGHT: "0.40"
+      # Cloud MCP HTTP endpoint is served on the SAME listener at POST /mcp (port 8080),
+      # authenticated with the Groundwork API key (BOOTSTRAP_API_KEY above for local dev).
+      # Local dev: allow a raw demo user_id so curl works without a signed JWT.
+      # PRODUCTION: remove ALLOW_DEMO_IDENTITY and set GROUNDWORK_JWT_HS_SECRET (or
+      # GROUNDWORK_JWT_RS_PUBLIC_KEY[_FILE]) so /mcp requires a verified identity token.
+      ALLOW_DEMO_IDENTITY: "true"
+      # GROUNDWORK_JWT_HS_SECRET: "replace-with-a-strong-secret"
+    ports:
+      # Exposes REST (/v1/query, /health, /metrics) AND Cloud MCP (POST /mcp).
+      - "8080:8080"
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+      spicedb:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  ingestion:
+    build:
+      context: ../services/ingestion
+    environment:
+      INGESTION_PORT: "8000"
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: groundwork_chunks
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: groundwork_chunks
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      EMBEDDING_CACHE_DIR: /models/fastembed
+      BOOTSTRAP_STORAGE: "true"
+      SPICEDB_ENDPOINT: http://spicedb:50051
+      SPICEDB_TOKEN: groundwork-local
+      SPICEDB_INSECURE_PLAINTEXT: "true"
+    ports:
+      - "8090:8000"
+    depends_on:
+      qdrant:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+      spicedb:
+        condition: service_started
+    volumes:
+      - embedding-models:/models/fastembed
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: groundwork
+      POSTGRES_PASSWORD: groundwork
+      POSTGRES_DB: groundwork
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U groundwork -d groundwork"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # Auto-applies the SQL migrations in /migrations BEFORE the query-runtime starts.
+  # This fixes the silent fail-closed bug where, on a fresh database, query-runtime
+  # started without the `audit_log` table, every audit write errored, and the engine
+  # (correctly) fail-closed to zero documents on every query. With this step in the
+  # compose graph, the schema is always present by the time the runtime queries it.
+  # The image is idempotent — re-running on an already-migrated DB is a no-op.
+  db-migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    environment:
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  spicedb:
+    image: authzed/spicedb:latest
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-no-tls", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
+    environment:
+      SPICEDB_DATASTORE_ENGINE: memory
+    ports:
+      - "50051:50051"
+      - "8443:8443"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: groundwork
+      MINIO_ROOT_PASSWORD: groundwork-local-dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  elasticsearch-data:
+  minio-data:
+  embedding-models:

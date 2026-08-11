@@ -1,0 +1,77 @@
+# Groundwork — GitHub Codespaces override.
+#
+# Layer this ON TOP of the dev compose (which exposes backend ports for seeding and uses
+# the real all-MiniLM embedder, so retrieval relevance is correct):
+#
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.codespace.yml up --build -d
+#
+# What this override changes vs the dev profile:
+#   1. SpiceDB → Supabase Postgres datastore (durable; survives restarts) + a one-shot
+#      `migrate head` that creates SpiceDB's datastore tables in Supabase before SpiceDB
+#      starts.
+#   2. Higher ACL timeouts, because your Supabase project is in ap-southeast-1 and
+#      the Codespace runs in its own region — each SpiceDB check is a cross-region round
+#      trip.
+#   3. Defines the `msgraph-connector` service under the `pilot` profile (NOT started by
+#      `up` or `make demo`; only by `make connector-enumerate`).
+#
+#   IMPORTANT: because the DB is remote, latency numbers from this setup are NOT
+#   Groundwork's real performance. Use it to prove CORRECTNESS (allow/deny, fail-closed,
+#   audit). For real p95 numbers, co-locate the runtime and the database.
+#
+# Required env (set as a Codespaces secret or in your shell before `up`):
+#   SPICEDB_DATASTORE_CONN_URI   Supabase SESSION-pooler URI (port 5432) with ?sslmode=require
+#
+# The audit log (DATABASE_URL) intentionally stays on the in-container Postgres here, to
+# keep audit writes fast/local. To put the audit log on Supabase too, also override
+# query-runtime's DATABASE_URL to your Supabase URI.
+
+services:
+  spicedb-migrate:
+    image: authzed/spicedb:latest
+    command: ["migrate", "head"]
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: ${SPICEDB_DATASTORE_CONN_URI:?set SPICEDB_DATASTORE_CONN_URI to your Supabase session-pooler URI with sslmode=require}
+    restart: "no"
+
+  spicedb:
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: ${SPICEDB_DATASTORE_CONN_URI:?set SPICEDB_DATASTORE_CONN_URI}
+      SPICEDB_LOG_FORMAT: json
+    depends_on:
+      spicedb-migrate:
+        condition: service_completed_successfully
+
+  query-runtime:
+    environment:
+      # Dev default is 500ms; bumped to tolerate cross-region Supabase round trips.
+      ACL_TIMEOUT_MS: "3000"
+
+  # ----------------------------------------------------------------------------------
+  # Microsoft Graph connector — gated by the `pilot` profile so it does NOT start with
+  # `docker compose up` or `make demo`. Bring it up explicitly via:
+  #   make connector-enumerate
+  # The scaffold validates env vars and exits; it enumerates the directory into the
+  # catalog tables (no SpiceDB writes in this build).
+  # ----------------------------------------------------------------------------------
+  msgraph-connector:
+    build:
+      context: ..
+      dockerfile: services/msgraph-connector/Dockerfile
+    profiles: ["pilot"]
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      POSTGRES_URL: postgres://groundwork:groundwork@postgres:5432/groundwork
+      MSGRAPH_TENANT_ID: ${MSGRAPH_TENANT_ID:-}
+      MSGRAPH_CLIENT_ID: ${MSGRAPH_CLIENT_ID:-}
+      MSGRAPH_CLIENT_SECRET: ${MSGRAPH_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 10s

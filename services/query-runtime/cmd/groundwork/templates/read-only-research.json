@@ -1,0 +1,36 @@
+{
+  "name": "read-only-research",
+  "description": "Bare read-only research agent: one built-in search tool, no connectors, minimal grants. The safest possible starter policy.",
+  "read_only": true,
+  "purpose": "research and summarization",
+  "region": "us",
+  "tools": [
+    {
+      "name": "research_search",
+      "description": "Read-only semantic search over the research corpus.",
+      "transport": "builtin",
+      "actions": [
+        { "action": "search", "resource_type": "research", "risk_level": "low", "read_only": true, "requires_human_approval": false }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "research-agent",
+      "tools": [
+        { "tool": "research_search", "actions": ["search"], "resource_scope": "read", "region_constraint": "us", "call_limit_per_run": 10, "requires_approval": false }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 20,
+    "max_denied_per_run": 2,
+    "max_approval_required_per_run": 0,
+    "max_tool_calls_per_action_per_run": 5,
+    "max_run_duration_seconds": 300,
+    "max_citations_per_query": 5
+  },
+  "notes": [
+    "The minimal surface: one tool, one action, one grant. Extend deliberately."
+  ]
+}

@@ -1,0 +1,272 @@
+# Groundwork — SOVEREIGN multi-region deployment (Phase 4).
+#
+# ONE region per stack. A regional deployment serves ONLY the tenants
+# assigned to its region (GROUNDWORK_TENANT_REGIONS). Every component
+# (Postgres, SpiceDB, Qdrant, Elasticsearch, telemetry, KMS, backup,
+# model endpoints) is co-located in the deployment region by default;
+# any cross-region flow requires an explicit GROUNDWORK_TRANSFER_POLICIES
+# entry of the right kind (telemetry | backup | model | audit). Anything
+# else fails closed — query-runtime refuses to start.
+#
+# Usage (pick ONE region profile):
+#
+#   cp deploy/sovereign/.env.eu.example .env
+#   # edit .env: real secrets, OIDC issuer, tenant regions
+#   docker compose -f deploy/sovereign/docker-compose.sovereign.yml --env-file .env up --build
+#
+# The runtime validates the deployment at startup (deployment.Validate):
+# an invalid region/jurisdiction, a public backend, a missing production
+# key, or no audit storage kills the container instead of serving.
+#
+# Validate externally: scripts/validate-non-bypassable.sh
+# (set GW_URL + GW_API_KEY; also checks region/identity/audit settings).
+
+services:
+  # The ONLY public ingress. Everything external goes through here.
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - query-runtime
+    ports:
+      - "${GATEWAY_HTTP_PORT:-80}:80"
+      # - "443:443"   # enable with a TLS cert mounted into the gateway
+    volumes:
+      - ./nginx/nginx.sovereign.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - groundwork
+
+  query-runtime:
+    build:
+      context: ../../services/query-runtime
+    restart: unless-stopped
+    # NOTE: no `ports:` — reachable only via the gateway.
+    expose:
+      - "8080"
+    environment:
+      QUERY_RUNTIME_ADDR: ":8080"
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: groundwork_chunks
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: groundwork_chunks
+      EMBEDDING_URL: http://ingestion:8000
+      QUERY_TIMEOUT_MS: "15000"
+      ACL_TIMEOUT_MS: "500"
+      BACKEND_HTTP_TIMEOUT_MS: "15000"
+      EMBEDDING_TIMEOUT_MS: "15000"
+      QDRANT_CIRCUIT_FAILURE_LIMIT: "3"
+      QDRANT_CIRCUIT_OPEN_TIMEOUT_MS: "10000"
+      QDRANT_CIRCUIT_HALF_OPEN_LIMIT: "1"
+      SPICEDB_ENDPOINT: spicedb:50051
+      SPICEDB_TOKEN: ${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY (openssl rand -hex 32)}
+      SPICEDB_INSECURE_PLAINTEXT: "true"
+      SPICEDB_CONSISTENCY: ${SPICEDB_CONSISTENCY:-at_least_as_fresh}
+      # Immutable, hash-chained audit ledger (synchronous, fail-closed).
+      DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
+
+      # --- Sovereign region (Phase 4) ---
+      # GROUNDWORK_DEPLOYMENT_REGION is required here: with it set, the
+      # runtime enforces the full fail-closed deployment validation and
+      # refuses to start on any problem.
+      GROUNDWORK_DEPLOYMENT_REGION: ${GROUNDWORK_DEPLOYMENT_REGION:?set GROUNDWORK_DEPLOYMENT_REGION (EU|UK|US or custom)}
+      GROUNDWORK_JURISDICTION: ${GROUNDWORK_JURISDICTION:-}
+      BOOTSTRAP_TENANT_ID: ${GROUNDWORK_BOOTSTRAP_TENANT_ID:-acme}
+      BOOTSTRAP_TENANT_REGION: ${GROUNDWORK_DEPLOYMENT_REGION}
+      # Tenant -> region map (the ONLY authority for tenant region;
+      # request bodies never set region). Every tenant served here must
+      # list this region; other tenants are refused.
+      GROUNDWORK_TENANT_REGIONS: ${GROUNDWORK_TENANT_REGIONS:?set GROUNDWORK_TENANT_REGIONS (e.g. acme:EU,contoso:EU)}
+      # Optional: component region overrides + explicit transfer policies.
+      # GROUNDWORK_POSTGRES_REGION: ${GROUNDWORK_POSTGRES_REGION:-}
+      # GROUNDWORK_TELEMETRY_REGION: ${GROUNDWORK_TELEMETRY_REGION:-}
+      # GROUNDWORK_TRANSFER_POLICIES: ${GROUNDWORK_TRANSFER_POLICIES:-}
+
+      # --- Enterprise identity: OIDC (Phase 4). Issuer discovery +
+      # JWKS are fetched at startup; an unreachable/inconsistent issuer
+      # fails startup. Tenant comes from the "tid" claim; admin ONLY
+      # from GROUNDWORK_OIDC_ADMIN_ROLES.
+      GROUNDWORK_OIDC_ISSUER: ${GROUNDWORK_OIDC_ISSUER:?set GROUNDWORK_OIDC_ISSUER}
+      GROUNDWORK_OIDC_CLIENT_ID: ${GROUNDWORK_OIDC_CLIENT_ID:?set GROUNDWORK_OIDC_CLIENT_ID}
+      GROUNDWORK_OIDC_AUDIENCE: ${GROUNDWORK_OIDC_AUDIENCE:-}
+      GROUNDWORK_OIDC_TENANT_ALLOWLIST: ${GROUNDWORK_OIDC_TENANT_ALLOWLIST:-}
+      GROUNDWORK_OIDC_ADMIN_ROLES: ${GROUNDWORK_OIDC_ADMIN_ROLES:-}
+      GROUNDWORK_OIDC_CANONICAL_CLAIM: ${GROUNDWORK_OIDC_CANONICAL_CLAIM:-}
+
+      # --- Signing keys (production: each purpose must be provisioned;
+      # missing keys fail startup) ---
+      GROUNDWORK_DELEGATION_RS_PRIVATE_KEY: ${GROUNDWORK_DELEGATION_RS_PRIVATE_KEY:?set GROUNDWORK_DELEGATION_RS_PRIVATE_KEY}
+      GROUNDWORK_OUTBOX_WEBHOOK_SECRET: ${GROUNDWORK_OUTBOX_WEBHOOK_SECRET:?set GROUNDWORK_OUTBOX_WEBHOOK_SECRET}
+      GROUNDWORK_AUDIT_DIGEST_KEY: ${GROUNDWORK_AUDIT_DIGEST_KEY:?set GROUNDWORK_AUDIT_DIGEST_KEY}
+      GROUNDWORK_DATABASE_KEY_ID: ${GROUNDWORK_DATABASE_KEY_ID:?set GROUNDWORK_DATABASE_KEY_ID}
+      GROUNDWORK_BACKUP_KEY_ID: ${GROUNDWORK_BACKUP_KEY_ID:?set GROUNDWORK_BACKUP_KEY_ID}
+
+      BOOTSTRAP_API_KEY: ${GROUNDWORK_BOOTSTRAP_API_KEY:?set GROUNDWORK_BOOTSTRAP_API_KEY}
+      # ALLOW_DEMO_IDENTITY is intentionally absent: raw user_id is
+      # never trusted; every query needs a verified OIDC assertion.
+      IDK_THRESHOLD: "0.70"
+      VECTOR_WEIGHT: "0.60"
+      KEYWORD_WEIGHT: "0.40"
+    depends_on:
+      qdrant:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+      spicedb:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - groundwork
+
+  # Optional CISO console — reachable only via the gateway (/console).
+  console:
+    build:
+      context: ../..
+      dockerfile: apps/console/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      QUERY_RUNTIME_URL: http://query-runtime:8080
+      INGESTION_RUNTIME_URL: http://ingestion:8000
+      NEXT_PUBLIC_APP_NAME: Groundwork
+    depends_on:
+      - query-runtime
+    networks:
+      - groundwork
+
+  # Document ingestion. Internal only.
+  ingestion:
+    build:
+      context: ../../services/ingestion
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      INGESTION_PORT: "8000"
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: groundwork_chunks
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_INDEX: groundwork_chunks
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      EMBEDDING_CACHE_DIR: /models/fastembed
+      BOOTSTRAP_STORAGE: "true"
+      SPICEDB_ENDPOINT: spicedb:50051
+      SPICEDB_TOKEN: ${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY (openssl rand -hex 32)}
+      SPICEDB_INSECURE_PLAINTEXT: "true"
+    depends_on:
+      qdrant:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+      spicedb:
+        condition: service_started
+    volumes:
+      - embedding-models:/models/fastembed
+    networks:
+      - groundwork
+
+  # --- Backends: NONE publish host ports. ---
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: groundwork
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-groundwork}
+      POSTGRES_DB: groundwork
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U groundwork -d groundwork"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - groundwork
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    expose:
+      - "6333"
+    environment:
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: "true"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - groundwork
+
+  spicedb:
+    image: authzed/spicedb:latest
+    restart: unless-stopped
+    expose:
+      - "50051"
+      - "8443"
+    command:
+      - serve
+      - --grpc-addr=0.0.0.0:50051
+      - --http-addr=0.0.0.0:8443
+      - --grpc-no-tls
+      - --datastore-engine=postgres
+      - "--datastore-conn-uri=postgres://groundwork:${POSTGRES_PASSWORD:-groundwork}@postgres:5432/groundwork_spicedb?sslmode=disable"
+      - --datastore-postgres-bootstrap-create-database=true
+      - --telemetry-endpoint=
+      - --dispatch-max-depth=50
+    environment:
+      SPICEDB_GRPC_PRESHARED_KEY: ${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY (openssl rand -hex 32)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - groundwork
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    expose:
+      - "9200"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - groundwork
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    expose:
+      - "9000"
+      - "9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-groundwork}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-groundwork-local-dev}
+    volumes:
+      - minio-data:/data
+    networks:
+      - groundwork
+
+networks:
+  groundwork:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  elasticsearch-data:
+  minio-data:
+  embedding-models:

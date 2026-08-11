@@ -1,0 +1,38 @@
+{
+  "name": "internal-knowledge",
+  "description": "Read-only internal knowledge assistant: search your enterprise knowledge base and retrieve citations. No writes, no connectors.",
+  "read_only": true,
+  "purpose": "internal knowledge retrieval",
+  "region": "uk",
+  "tools": [
+    {
+      "name": "knowledge_search",
+      "description": "Semantic search over the internal knowledge corpus (Qdrant-backed).",
+      "transport": "builtin",
+      "actions": [
+        { "action": "search", "resource_type": "knowledge", "risk_level": "low", "read_only": true, "requires_human_approval": false },
+        { "action": "retrieve", "resource_type": "knowledge_document", "risk_level": "low", "read_only": true, "requires_human_approval": false }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "knowledge-agent",
+      "tools": [
+        { "tool": "knowledge_search", "actions": ["search", "retrieve"], "resource_scope": "read", "region_constraint": "uk", "call_limit_per_run": 20, "requires_approval": false }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 30,
+    "max_denied_per_run": 3,
+    "max_approval_required_per_run": 0,
+    "max_tool_calls_per_action_per_run": 5,
+    "max_run_duration_seconds": 300,
+    "max_citations_per_query": 5
+  },
+  "notes": [
+    "Replace region_constraint and register the agent (POST /v1/agents) before wiring the grant.",
+    "All actions are read_only — the agent can cite but never mutate documents."
+  ]
+}

@@ -1,0 +1,247 @@
+groups:
+  # Groundwork SLO alerting (Phase 8.5). Every rule references a metric
+  # emitted by the query-runtime /metrics endpoint. Tune thresholds per
+  # tenant SLO in the expressions below; {{ $labels.tenant_id }} keeps
+  # per-tenant routing possible.
+  - name: groundwork-slo.rules
+    rules:
+      # Decision quality SLO: the fail-closed rate must stay under 5%.
+      - alert: GroundworkFailClosedRateHigh
+        expr: |
+          sum by (tenant_id) (rate(groundwork_slo_decisions_total{outcome="fail_closed"}[5m]))
+            / clamp_min(sum by (tenant_id) (rate(groundwork_slo_decisions_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: page
+          slo: decision_reliability
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} fail-closed rate above 5%"
+          description: "Fail-closed decisions exceeded the 5% error budget for {{ $labels.tenant_id }}. Check SpiceDB, agent registry, and budget lookup health."
+
+      # Denial-rate anomaly: policy denials spiking usually mean a
+      # misconfigured grant, emergency control, or budget exhaustion.
+      - alert: GroundworkDenialRateSpike
+        expr: |
+          sum by (tenant_id) (rate(groundwork_slo_decisions_total{outcome="denied"}[5m]))
+            / clamp_min(sum by (tenant_id) (rate(groundwork_slo_decisions_total[5m])), 0.001)
+          > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          slo: decision_reliability
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} denial rate above 50%"
+          description: "More than half of governed decisions were denied for {{ $labels.tenant_id }}. Review grants, emergency controls, and budget policies."
+
+      # API availability SLO: server errors above 1% of traffic.
+      - alert: GroundworkHighServerErrorRate
+        expr: |
+          sum by (tenant_id) (rate(groundwork_http_requests_total{code_class="5xx"}[5m]))
+            / clamp_min(sum by (tenant_id) (rate(groundwork_http_requests_total[5m])), 0.001)
+          > 0.01
+        for: 10m
+        labels:
+          severity: page
+          slo: api_availability
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} 5xx rate above 1%"
+          description: "{{ $labels.tenant_id }} returned server errors on more than 1% of requests in the last 5 minutes."
+
+      # Outbox health: the oldest pending event must not age past 10m
+      # (delivery is at-least-once; a stuck worker breaks evidence flow).
+      - alert: GroundworkOutboxStale
+        expr: groundwork_outbox_pending_age_seconds > 600
+        for: 5m
+        labels:
+          severity: page
+          slo: evidence_delivery
+        annotations:
+          summary: "Outbox delivery stalled for {{ $labels.tenant_id }}"
+          description: "Oldest pending outbox event for {{ $labels.tenant_id }} is older than 10 minutes. Check the outbox worker and webhook endpoint."
+
+      # Outbox dead letters require manual inspection.
+      - alert: GroundworkOutboxDeadLetterBacklog
+        expr: groundwork_outbox_dead_letter_pending > 10
+        for: 15m
+        labels:
+          severity: warning
+          slo: evidence_delivery
+        annotations:
+          summary: "Dead-letter backlog for {{ $labels.tenant_id }}"
+          description: "{{ $labels.tenant_id }} has {{ $value }} outbox events dead-lettered. Inspect webhook failures and replay."
+
+      # Audit-chain verification failures are tamper-evidence events and
+      # page immediately.
+      - alert: GroundworkAuditVerifyFailure
+        expr: increase(groundwork_audit_verify_total{outcome="failed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: page
+          slo: evidence_integrity
+        annotations:
+          summary: "Audit chain verification failed for {{ $labels.tenant_id }}"
+          description: "The evidence chain for {{ $labels.tenant_id }} failed verification ({{ $value }} failures in 15m). Treat as a possible tamper event; run /v1/governance/audit/verify and inspect the first broken event."
+
+      # Key expiry: warn at 30 days, page once expired.
+      - alert: GroundworkKeyExpiringSoon
+        expr: groundwork_key_days_until_expiry > 0 and groundwork_key_days_until_expiry < 30
+        for: 0m
+        labels:
+          severity: warning
+          slo: key_hygiene
+        annotations:
+          summary: "Key {{ $labels.purpose }} expires in {{ $value | humanize }} days"
+          description: "Rotate the {{ $labels.purpose }} key before it expires."
+
+      - alert: GroundworkKeyExpired
+        expr: groundwork_key_days_until_expiry < 0
+        for: 0m
+        labels:
+          severity: page
+          slo: key_hygiene
+        annotations:
+          summary: "Key {{ $labels.purpose }} is expired"
+          description: "The {{ $labels.purpose }} key has expired; external integrations will fail. Rotate immediately."
+
+      # Connector credential expiry: warn at 30 days, page once expired
+      # (secret_ref is the reference, never material).
+      - alert: GroundworkConnectorCredentialExpiringSoon
+        expr: groundwork_connector_credential_days_until_expiry > 0 and groundwork_connector_credential_days_until_expiry < 30
+        for: 0m
+        labels:
+          severity: warning
+          slo: key_hygiene
+        annotations:
+          summary: "Connector {{ $labels.connector_id }} credential expires in {{ $value | humanize }} days"
+          description: "The credential behind {{ $labels.secret_ref }} for connector {{ $labels.connector_id }} (tenant {{ $labels.tenant_id }}) expires in {{ $value | humanize }} days. Rotate before it expires."
+
+      - alert: GroundworkConnectorCredentialExpired
+        expr: groundwork_connector_credential_days_until_expiry < 0
+        for: 0m
+        labels:
+          severity: page
+          slo: key_hygiene
+        annotations:
+          summary: "Connector {{ $labels.connector_id }} credential is expired"
+          description: "The credential behind {{ $labels.secret_ref }} for connector {{ $labels.connector_id }} (tenant {{ $labels.tenant_id }}) has expired; dispatches will fail. Rotate immediately."
+
+      # Connector reliability: an unhealthy probe or failed dispatch
+      # pages after persistence.
+      - alert: GroundworkConnectorUnhealthy
+        expr: groundwork_connector_health == 0
+        for: 10m
+        labels:
+          severity: warning
+          slo: connector_reliability
+        annotations:
+          summary: "Connector {{ $labels.connector_id }} unhealthy for {{ $labels.tenant_id }}"
+          description: "Connector {{ $labels.connector_id }} has failed health probes for 10 minutes."
+
+      - alert: GroundworkConnectorErrorRateHigh
+        expr: |
+          sum by (tenant_id) (rate(groundwork_connector_errors_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          slo: connector_reliability
+        annotations:
+          summary: "Connector failures for {{ $labels.tenant_id }}"
+          description: "More than one connector dispatch failed per second for {{ $labels.tenant_id }}."
+
+      # Dependency circuit breakers must not stay open.
+      - alert: GroundworkCircuitBreakerOpen
+        expr: groundwork_circuit_breaker_state > 0
+        for: 10m
+        labels:
+          severity: warning
+          slo: dependency_availability
+        annotations:
+          summary: "Circuit breaker {{ $labels.service }} open"
+          description: "The {{ $labels.service }} circuit breaker has been open for 10 minutes; traffic is being failed closed."
+
+      - alert: GroundworkRelationshipBackendUnreachable
+        expr: increase(groundwork_relationship_backend_unreachable_total[15m]) > 5
+        for: 5m
+        labels:
+          severity: page
+          slo: dependency_availability
+        annotations:
+          summary: "Relationship backend unreachable"
+          description: "The relationship authorization backend (SpiceDB) was unreachable {{ $value }} times in 15 minutes; decisions fail closed while it is down."
+
+      # Budget exhaustions trending up usually mean a runaway agent.
+      - alert: GroundworkBudgetExhaustionSpike
+        expr: increase(groundwork_budget_exhaustions_total[15m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+          slo: budget_governance
+        annotations:
+          summary: "Budget exhaustions spiking for {{ $labels.tenant_id }}"
+          description: "{{ $labels.tenant_id }} hit {{ $value }} budget denials in 15 minutes. Check for a runaway agent or misconfigured limits."
+
+      # Outbox backpressure (Phase 8.2): the evidence pipeline refuses
+      # new work above the high-water mark; repeated refusals mean the
+      # delivery side is the problem, not the writers.
+      - alert: GroundworkOutboxBackpressureRefusals
+        expr: increase(groundwork_outbox_backpressure_rejections_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          slo: evidence_delivery
+        annotations:
+          summary: "Outbox backpressure refusals for {{ $labels.tenant_id }}"
+          description: "{{ $labels.tenant_id }} had {{ $value }} outbox backpressure refusals in 15 minutes. The pending outbox is at/above its high-water mark; check webhook delivery and the outbox worker."
+
+      # Instance-wide overload shedding (Phase 8.2): the whole process
+      # is saturated and requests are refused immediately rather than
+      # queued.
+      - alert: GroundworkOverloadRefusals
+        expr: increase(groundwork_overload_rejections_total[15m]) > 0
+        for: 10m
+        labels:
+          severity: page
+          slo: api_availability
+        annotations:
+          summary: "Overload refusals for {{ $labels.tenant_id }}"
+          description: "{{ $labels.tenant_id }} was refused {{ $value }} requests for overload in 15 minutes (OVERLOAD_MAX_CONCURRENT_REQUESTS). Increase capacity or tune the limit."
+
+      # Per-tenant capacity caps (Phase 8.2): the tenant is pinned at its
+      # capacity-tier in-flight cap and is being refused work. The tier
+      # itself may be too small for the tenant's traffic, or the tier is
+      # misconfigured — this is a tenant-planning signal, not a cluster
+      # crisis.
+      - alert: GroundworkTenantCapacityRefusals
+        expr: increase(groundwork_tenant_capacity_rejections_total[15m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          slo: api_availability
+        annotations:
+          summary: "Capacity-cap refusals for {{ $labels.tenant_id }}"
+          description: "{{ $labels.tenant_id }} was refused {{ $value }} requests at its capacity-tier in-flight cap in 15 minutes (LIMIT_CONCURRENCY_PER_TENANT / CAPACITY_CONCURRENCY_PLUS / CAPACITY_CONCURRENCY_ENTERPRISE). Raise the tier or tune the limits."
+
+      # Dispatch circuits (Phase 8.2): an open circuit means a dead
+      # connector or delivery endpoint is failing fast instead of
+      # burning timeout + retry budget. The connector alert tells you
+      # WHICH endpoint; the outbox alert points at the webhook.
+      - alert: GroundworkConnectorBreakerOpen
+        expr: groundwork_connector_breaker_state > 1
+        for: 10m
+        labels:
+          severity: warning
+          slo: connector_reliability
+        annotations:
+          summary: "Dispatch circuit open for connector {{ $labels.connector_id }} of {{ $labels.tenant_id }}"
+          description: "Connector {{ $labels.connector_id }} has failed 3 consecutive dispatches; calls fail fast with connector_breaker_open until a probe succeeds. Check the connector endpoint and its health probe."
+
+      - alert: GroundworkOutboxDeliveryBreakerOpen
+        expr: groundwork_outbox_delivery_breaker_state > 1
+        for: 10m
+        labels:
+          severity: warning
+          slo: evidence_delivery
+        annotations:
+          summary: "Outbox delivery circuit open for {{ $labels.tenant_id }}"
+          description: "The webhook endpoint has failed 3 consecutive deliveries for {{ $labels.tenant_id }}; deliveries are paused (events stay pending) until a probe succeeds. Check the webhook receiver — the pending backlog will trip outbox backpressure next."

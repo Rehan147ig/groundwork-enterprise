@@ -1,0 +1,46 @@
+{
+  "name": "customer-support",
+  "description": "Customer support assistant: read-only lookup of tickets and knowledge, with human approval required for any customer-visible action.",
+  "read_only": true,
+  "purpose": "customer support triage",
+  "region": "eu",
+  "tools": [
+    {
+      "name": "ticket_lookup",
+      "description": "Read customer tickets from the support desk (read-only).",
+      "transport": "http",
+      "actions": [
+        { "action": "read", "resource_type": "support_ticket", "risk_level": "medium", "read_only": true, "requires_human_approval": false }
+      ]
+    },
+    {
+      "name": "support_knowledge",
+      "description": "Search the support knowledge base for resolution guidance.",
+      "transport": "builtin",
+      "actions": [
+        { "action": "search", "resource_type": "knowledge", "risk_level": "low", "read_only": true, "requires_human_approval": false }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "support-agent",
+      "tools": [
+        { "tool": "ticket_lookup", "actions": ["read"], "resource_scope": "read", "region_constraint": "eu", "call_limit_per_run": 15, "requires_approval": false },
+        { "tool": "support_knowledge", "actions": ["search"], "resource_scope": "read", "region_constraint": "eu", "call_limit_per_run": 20, "requires_approval": false }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 40,
+    "max_denied_per_run": 3,
+    "max_approval_required_per_run": 2,
+    "max_tool_calls_per_action_per_run": 5,
+    "max_run_duration_seconds": 300,
+    "max_citations_per_query": 5
+  },
+  "notes": [
+    "Ticket data is customer data — keep region_constraint aligned with the deployment region.",
+    "No reply/update actions are granted: customer-visible writes require a separate approved tool."
+  ]
+}

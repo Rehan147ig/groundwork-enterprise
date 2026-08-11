@@ -1,0 +1,38 @@
+{
+  "name": "finance-agent",
+  "description": "Finance analyst assistant: read-only ledger and statement lookup with medium risk level. Every action is read_only; approval required for any future write action.",
+  "read_only": true,
+  "purpose": "financial analysis",
+  "region": "uk",
+  "tools": [
+    {
+      "name": "ledger_lookup",
+      "description": "Read ledger entries, statements, and balances (read-only).",
+      "transport": "http",
+      "actions": [
+        { "action": "read_entry", "resource_type": "ledger_entry", "risk_level": "high", "read_only": true, "requires_human_approval": false },
+        { "action": "read_statement", "resource_type": "statement", "risk_level": "medium", "read_only": true, "requires_human_approval": false }
+      ]
+    }
+  ],
+  "grants": [
+    {
+      "agent_label": "finance-agent",
+      "tools": [
+        { "tool": "ledger_lookup", "actions": ["read_entry", "read_statement"], "resource_scope": "read", "region_constraint": "uk", "call_limit_per_run": 25, "requires_approval": false }
+      ]
+    }
+  ],
+  "budget_policy": {
+    "max_actions_per_run": 50,
+    "max_denied_per_run": 5,
+    "max_approval_required_per_run": 0,
+    "max_tool_calls_per_action_per_run": 10,
+    "max_run_duration_seconds": 600,
+    "max_citations_per_query": 10
+  },
+  "notes": [
+    "Financial data carries the highest evidence expectations — keep audit verification enabled.",
+    "Any write action (journal, transfer) must be added with requires_human_approval=true."
+  ]
+}
