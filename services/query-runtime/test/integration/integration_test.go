@@ -15,7 +15,7 @@ import (
 // Test 1: a verified-but-unauthorized user receives ZERO documents, while the authorized user
 // receives the document — proving live per-user enforcement against real Qdrant + SpiceDB.
 func TestFailClosedOnUnauthorizedUser(t *testing.T) {
-	requireIntegration(t)
+	requireFullStack(t)
 	db := openDB(t)
 
 	tenant := "tenant_authz_" + unique()
@@ -52,7 +52,7 @@ func TestFailClosedOnUnauthorizedUser(t *testing.T) {
 // Test 2: when SpiceDB is unreachable, the engine must fail closed — return zero documents
 // rather than fall open. Retrieval still succeeds (Qdrant is up); only the ACL backend is down.
 func TestFailClosedWhenSpiceDBDown(t *testing.T) {
-	requireIntegration(t)
+	requireFullStack(t)
 	db := openDB(t)
 
 	tenant := "tenant_down_" + unique()
@@ -80,7 +80,7 @@ func TestFailClosedWhenSpiceDBDown(t *testing.T) {
 // Test 3: queries actually write to the immutable Postgres audit ledger, and the persisted
 // rows form a valid hash chain (read back via the production LoadAuditChain + VerifyChain).
 func TestAuditChainWritesToPostgres(t *testing.T) {
-	requireIntegration(t)
+	requireFullStack(t)
 	db := openDB(t)
 
 	tenant := "tenant_audit_" + unique() // isolated chain for deterministic assertions

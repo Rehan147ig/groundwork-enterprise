@@ -31,10 +31,6 @@ type trustStack struct {
 	govStore *governance.PostgresStore
 }
 
-func newTrustStack(t *testing.T, db *sql.DB) *trustStack {
-	return newTrustStack(t, db, nil)
-}
-
 func newTrustStack(t *testing.T, db *sql.DB, authorizer relationship.Authorizer) *trustStack {
 	t.Helper()
 	t.Setenv("GROUNDWORK_DELEGATION_HS_SECRET", "integration-hs-secret-0123456789abcdef")
@@ -110,7 +106,7 @@ func TestTrustRelationshipPostgresLifecycle(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 	tenant := "tenant_trust_rel_" + unique()
-	stack := newTrustStack(t, db)
+	stack := newTrustStack(t, db, nil)
 
 	parent := stack.activateAgent(t, tenant, "trust-parent", "principal:owner")
 	child := stack.activateAgent(t, tenant, "trust-child", "principal:child-owner")
@@ -268,7 +264,7 @@ func TestTrustPostgresChildDelegationAndTransferPolicyGate(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 	tenant := "tenant_trust_del_" + unique()
-	stack := newTrustStack(t, db)
+	stack := newTrustStack(t, db, nil)
 
 	parent := stack.activateAgent(t, tenant, "del-parent", "principal:owner")
 	child := stack.activateAgent(t, tenant, "del-child", "principal:child-owner")
@@ -406,7 +402,7 @@ func TestExternalAgentPostgresLifecycle(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("GROUNDWORK_EXTERNAL_INTERNAL_DEMO", "true")
 	tenant := "tenant_ext_agent_" + unique()
-	stack := newTrustStack(t, db)
+	stack := newTrustStack(t, db, nil)
 
 	paired := stack.activateAgent(t, tenant, "paired-agent", "principal:owner")
 
@@ -490,7 +486,7 @@ func TestPhase6TrustPolicyObjectsPostgres(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("GROUNDWORK_EXTERNAL_INTERNAL_DEMO", "true")
 	tenant := "tenant_trust_pol_" + unique()
-	stack := newTrustStack(t, db)
+	stack := newTrustStack(t, db, nil)
 
 	paired := stack.activateAgent(t, tenant, "pol-paired", "principal:owner")
 	ext, err := stack.svc.OnboardExternalAgent(ctx, tenant, "principal:admin", true, runtime.ExternalAgentRequest{
@@ -602,7 +598,7 @@ func TestPhase6TrustPolicyObjectsPostgres(t *testing.T) {
 // nonce replay protection, budget counters, consent revocation gating,
 // per-run budget denial, and termination.
 func TestExternalRunPostgresLifecycle(t *testing.T) {
-	requireIntegration(t)
+	requireFullStack(t)
 	db := openDB(t)
 	ctx := context.Background()
 	t.Setenv("GROUNDWORK_EXTERNAL_INTERNAL_DEMO", "true")

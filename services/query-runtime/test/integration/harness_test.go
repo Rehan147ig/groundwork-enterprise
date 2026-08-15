@@ -68,10 +68,26 @@ func migrationsDir() string {
 
 // requireIntegration skips a test unless the live-backend env is configured. A skip (not a
 // silent pass) keeps `go test -tags integration` honest when the stack isn't running.
+// Postgres is the only mandatory backend: the SQL-level suite (audit chain, write-once,
+// usage, trust, agents, connectors) runs against just a Postgres service container.
 func requireIntegration(t *testing.T) {
 	t.Helper()
 	if testDatabaseURL() == "" {
 		t.Skip("integration backends not configured; run scripts/integration-test.sh (sets GROUNDWORK_TEST_DATABASE_URL/SPICEDB_ENDPOINT/QDRANT_URL)")
+	}
+}
+
+// requireFullStack additionally demands SpiceDB + Qdrant for the engine
+// end-to-end tests. CI's Postgres-only job skips these; the local
+// scripts/integration-test.sh stack runs them all.
+func requireFullStack(t *testing.T) {
+	t.Helper()
+	requireIntegration(t)
+	if os.Getenv("GROUNDWORK_TEST_SPICEDB_ENDPOINT") == "" {
+		t.Skip("SpiceDB not configured (GROUNDWORK_TEST_SPICEDB_ENDPOINT unset); skipping engine end-to-end test")
+	}
+	if os.Getenv("GROUNDWORK_TEST_QDRANT_URL") == "" {
+		t.Skip("Qdrant not configured (GROUNDWORK_TEST_QDRANT_URL unset); skipping engine end-to-end test")
 	}
 }
 
@@ -83,8 +99,15 @@ func TestMain(m *testing.M) {
 			fmt.Fprintf(os.Stderr, "integration setup: %v\n", err)
 			os.Exit(1)
 		}
-		waitSpiceDB(30 * time.Second)
-		waitHTTP(testQdrantURL()+"/readyz", 30*time.Second)
+		// Wait for a backend only when it is explicitly configured: a
+		// Postgres-only CI job (Postgres service container) must not
+		// block on SpiceDB/Qdrant that will never appear.
+		if os.Getenv("GROUNDWORK_TEST_SPICEDB_ENDPOINT") != "" {
+			waitSpiceDB(30 * time.Second)
+		}
+		if os.Getenv("GROUNDWORK_TEST_QDRANT_URL") != "" {
+			waitHTTP(testQdrantURL()+"/readyz", 30*time.Second)
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -421,7 +444,7 @@ func newEngine(vector runtime.VectorSearcher, acl engine.ACLChecker, auditor eng
 			Total:        15 * time.Second,
 			Embedding:    10 * time.Second,
 			QdrantSearch: 10 * time.Second,
-			ACLCheck: 10 * time.Second,
+			ACLCheck:     10 * time.Second,
 			AuditWrite:   10 * time.Second,
 		},
 		Backend: engine.VectorRetrievalClient{Vector: vector},

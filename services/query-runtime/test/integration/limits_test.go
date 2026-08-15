@@ -56,7 +56,7 @@ func identityToken(t *testing.T, subject string) string {
 // rate_limit_exceeded + Retry-After before it ever reaches the engine,
 // and the health endpoint stays exempt.
 func TestTenantRateLimitEnforcedOnQuery(t *testing.T) {
-	requireIntegration(t)
+	requireFullStack(t)
 	db := openDB(t)
 
 	tenant := "tenant_rate_" + unique()

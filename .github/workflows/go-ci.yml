@@ -23,6 +23,24 @@ jobs:
     defaults:
       run:
         working-directory: services/query-runtime
+    # Postgres 16 service container for the SQL-level integration tests
+    # (test/integration, `integration` build tag): immutable audit
+    # ledger, write-once RULEs, hash-chain verification, and
+    # cross-tenant isolation run against real Postgres in CI.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: groundwork
+          POSTGRES_PASSWORD: groundwork
+          POSTGRES_DB: groundwork
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U groundwork -d groundwork"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,3 +97,13 @@ jobs:
 
       - name: Test (race detector)
         run: go test -race ./...
+
+      - name: Integration tests (Postgres 16 service container)
+        # SQL-level integration suite: write-once audit RULEs, hash-chain
+        # verification over Postgres, cross-tenant isolation under
+        # concurrent writes, plus the other Postgres-backed suites
+        # (usage, trust, agents, connectors). Engine end-to-end tests
+        # that need SpiceDB+Qdrant skip cleanly via requireFullStack.
+        env:
+          GROUNDWORK_TEST_DATABASE_URL: postgres://groundwork:groundwork@localhost:5432/groundwork?sslmode=disable
+        run: go test -v -tags=integration ./test/integration/...

@@ -182,18 +182,25 @@ func (p *PostgresAuditWriter) Write(ctx context.Context, entry AuditEntry) error
 	// Not implemented today because:
 	//   - the current per-tenant ceiling (~thousands of writes/sec) is far
 	//     above any agent fleet's per-tenant volume;
-	//   - LoadAuditChain's ORDER BY (timestamp_utc, id) tolerates intra-bucket
+	//   - LoadAuditChain's ORDER BY seq (migration 030) tolerates intra-bucket
 	//     reordering; chain verification still works.
 	//
 	// Do NOT replace with an async outbox — that breaks the synchronous
 	// fail-closed contract (TestAuditWrite_FailsEngine).
+	//
+	// Ordering note (migration 030): the previous-hash lookup and
+	// LoadAuditChain order by the monotonic seq column, NOT
+	// (timestamp_utc, id) — id is a random UUID and timestamps have
+	// microsecond ties, so the old ordering could invert the relative
+	// order of two same-tenant writes made within one microsecond and
+	// VerifyChain would report a broken link on an innocent chain.
 	if _, err := tx.ExecContext(writeCtx, `SELECT pg_advisory_xact_lock(hashtext($1))`, entry.TenantID); err != nil {
 		return err
 	}
 
 	var prevHash sql.NullString
 	if err := tx.QueryRowContext(writeCtx,
-		`SELECT immutable_digest FROM audit_log WHERE tenant_id = $1 ORDER BY timestamp_utc DESC, id DESC LIMIT 1`,
+		`SELECT immutable_digest FROM audit_log WHERE tenant_id = $1 ORDER BY seq DESC LIMIT 1`,
 		entry.TenantID,
 	).Scan(&prevHash); err != nil && err != sql.ErrNoRows {
 		return err
@@ -413,7 +420,7 @@ func LoadAuditChain(ctx context.Context, db *sql.DB, tenantID string) ([]AuditEn
 		       immutable_digest, previous_hash
 		FROM audit_log
 		WHERE tenant_id = $1
-		ORDER BY timestamp_utc ASC, id ASC
+		ORDER BY seq
 	`, tenantID)
 	if err != nil {
 		return nil, err
