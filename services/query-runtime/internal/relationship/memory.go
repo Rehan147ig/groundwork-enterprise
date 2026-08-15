@@ -46,7 +46,8 @@ func (m *MemoryBackend) Ready(ctx context.Context) error { return nil }
 
 // Check implements Authorizer. It fails closed on empty or invalid
 // components, unknown permissions, and never panics. Tenant scoping is
-// enforced at the map level.
+// enforced at the map level. The read lock guards the recursive
+// subjectHolds descent against concurrent Write/Delete mutation.
 func (m *MemoryBackend) Check(ctx context.Context, req CheckRequest) (bool, error) {
 	if err := ValidateSubject(req.Subject); err != nil {
 		return false, nil
@@ -54,6 +55,8 @@ func (m *MemoryBackend) Check(ctx context.Context, req CheckRequest) (bool, erro
 	if err := ValidateResource(req.Resource); err != nil {
 		return false, nil
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.subjectHolds(req.TenantID, req.Subject, PermissionToRelation(req.Permission), req.Resource), nil
 }
 
