@@ -130,7 +130,7 @@ func (s *Syncer) DetectDrift(ctx context.Context, tenantID string) (DriftReport,
 	have := tupleSet(current)
 
 	report := DriftReport{
-		TenantID:            tenantID,
+		TenantID:                tenantID,
 		SourceMissingInBackend:  difference(desired, have),
 		BackendExtraNotInSource: difference(have, desired),
 	}

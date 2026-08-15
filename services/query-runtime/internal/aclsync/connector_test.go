@@ -32,8 +32,8 @@ func TestMockConnector_PermissionMapping(t *testing.T) {
 		{"user:finance_user", "document:security-policy", true},  // finance -> finance-folder -> doc
 		{"user:general_user", "document:security-policy", false}, // not in finance
 		{"user:executive_user", "document:security-policy", false},
-		{"user:general_user", "document:handbook", true},  // employees -> public-folder -> doc
-		{"user:finance_user", "document:handbook", true},  // nested: finance ⊂ employees
+		{"user:general_user", "document:handbook", true},   // employees -> public-folder -> doc
+		{"user:finance_user", "document:handbook", true},   // nested: finance ⊂ employees
 		{"user:executive_user", "document:handbook", true}, // nested: executives ⊂ employees
 		{"user:executive_user", "document:board-minutes", true},
 		{"user:finance_user", "document:board-minutes", false},

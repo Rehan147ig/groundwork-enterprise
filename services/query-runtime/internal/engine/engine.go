@@ -334,10 +334,10 @@ func (e *Engine) filterChunksConcurrently(ctx context.Context, cfg TimeoutConfig
 				gwmetrics.RecordBlockedChunks(req.TenantID, item.reason, 1)
 				continue
 			}
-		if item.err != nil {
-			aclErrors++
-			gwmetrics.RecordRelationshipBackendUnreachable(req.TenantID)
-		}
+			if item.err != nil {
+				aclErrors++
+				gwmetrics.RecordRelationshipBackendUnreachable(req.TenantID)
+			}
 			if !item.allowed {
 				blockedACL++
 				blockedValid = append(blockedValid, item.candidate)
@@ -352,11 +352,11 @@ func (e *Engine) filterChunksConcurrently(ctx context.Context, cfg TimeoutConfig
 				decisions = append(decisions, decisionFromCandidate(candidate, false, "acl_timeout_fail_closed"))
 				gwmetrics.RecordBlockedChunks(req.TenantID, "acl_timeout_fail_closed", 1)
 			}
-		aclErrors++
-		aclCircuit.ReportFailure()
-		gwmetrics.RecordRelationshipBackendUnreachable(req.TenantID)
-		gwmetrics.SetCircuitBreakerState("relationship", circuitMetricState(aclCircuit.State()))
-		return permitted, blockedACL, blockedRegion, decisions, blockedValid
+			aclErrors++
+			aclCircuit.ReportFailure()
+			gwmetrics.RecordRelationshipBackendUnreachable(req.TenantID)
+			gwmetrics.SetCircuitBreakerState("relationship", circuitMetricState(aclCircuit.State()))
+			return permitted, blockedACL, blockedRegion, decisions, blockedValid
 		}
 	}
 

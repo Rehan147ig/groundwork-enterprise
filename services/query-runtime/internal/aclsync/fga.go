@@ -152,4 +152,3 @@ func viewerDocument(set map[Tuple]bool, user, document string) bool {
 	}
 	return false
 }
-

@@ -10,7 +10,7 @@ type TimeoutConfig struct {
 	Total        time.Duration
 	Embedding    time.Duration
 	QdrantSearch time.Duration
-	ACLCheck time.Duration
+	ACLCheck     time.Duration
 	AuditWrite   time.Duration
 }
 
@@ -19,7 +19,7 @@ func DefaultTimeoutConfig() TimeoutConfig {
 		Total:        15 * time.Second,
 		Embedding:    15 * time.Second,
 		QdrantSearch: 15 * time.Second,
-		ACLCheck: 60 * time.Millisecond,
+		ACLCheck:     60 * time.Millisecond,
 		AuditWrite:   30 * time.Millisecond,
 	}
 }
@@ -30,7 +30,7 @@ func TimeoutConfigFromEnv() TimeoutConfig {
 		Total:        envDuration("BACKEND_HTTP_TIMEOUT_MS", defaults.Total),
 		Embedding:    envDuration("EMBEDDING_TIMEOUT_MS", defaults.Embedding),
 		QdrantSearch: envDuration("QDRANT_TIMEOUT_MS", defaults.QdrantSearch),
-		ACLCheck: envDuration("RELATIONSHIP_TIMEOUT_MS", defaults.ACLCheck),
+		ACLCheck:     envDuration("RELATIONSHIP_TIMEOUT_MS", defaults.ACLCheck),
 		AuditWrite:   envDuration("AUDIT_TIMEOUT_MS", defaults.AuditWrite),
 	}
 }

@@ -122,8 +122,8 @@ type AuditEntryRead struct {
 	// OpenFGALatencyMs is the relationship-backend latency. The name and
 	// its JSON/DB wire form ("openfga_latency_ms") are historical audit
 	// schema and are kept stable — audit rows are immutable.
-	OpenFGALatencyMs int
-	QdrantLatencyMs  int
+	OpenFGALatencyMs    int
+	QdrantLatencyMs     int
 	CircuitBreakerState string
 	IdentityResolution  string
 	PrincipalID         string

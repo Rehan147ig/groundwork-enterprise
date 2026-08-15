@@ -40,7 +40,7 @@ func TestRevocationSLA(t *testing.T) {
 		Config: engine.TimeoutConfig{
 			Total:        2 * time.Second,
 			QdrantSearch: time.Second,
-			ACLCheck: time.Second,
+			ACLCheck:     time.Second,
 			AuditWrite:   200 * time.Millisecond,
 		},
 		Backend: revocationRetrieval{candidates: []runtime.Candidate{{

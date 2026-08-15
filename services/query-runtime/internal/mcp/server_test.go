@@ -21,7 +21,7 @@ func newTestEngine() *engine.Engine {
 		Config: engine.TimeoutConfig{
 			Total:        500 * time.Millisecond,
 			QdrantSearch: 100 * time.Millisecond,
-			ACLCheck: 150 * time.Millisecond,
+			ACLCheck:     150 * time.Millisecond,
 			AuditWrite:   50 * time.Millisecond,
 		},
 		Backend: engine.VectorRetrievalClient{Vector: backend.Vector},
@@ -123,7 +123,7 @@ func TestMCPUsesCanonicalIdentity(t *testing.T) {
 		Config: engine.TimeoutConfig{
 			Total:        500 * time.Millisecond,
 			QdrantSearch: 100 * time.Millisecond,
-			ACLCheck: 150 * time.Millisecond,
+			ACLCheck:     150 * time.Millisecond,
 			AuditWrite:   50 * time.Millisecond,
 		},
 		Backend: engine.VectorRetrievalClient{Vector: backend.Vector},

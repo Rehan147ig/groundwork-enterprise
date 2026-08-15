@@ -124,7 +124,7 @@ func NewService(store Store, authority *Authority, authorizer relationship.Autho
 	return &Service{
 		store:         store,
 		authority:     authority,
-		authorizer:           authorizer,
+		authorizer:    authorizer,
 		agents:        agents,
 		now:           time.Now,
 		policyVersion: policyVersion,

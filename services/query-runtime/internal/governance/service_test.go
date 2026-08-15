@@ -126,12 +126,12 @@ func newTestAuthority(now func() time.Time) *Authority {
 // harness wires a MemoryStore + Authority + fakes into a Service with a
 // single fixed clock shared by every component.
 type harness struct {
-	clock  *clockFunc
-	store  *MemoryStore
-	auth   *Authority
-	agents *fakeAgents
-	authorizer    *fakeAuthorizer
-	svc    *Service
+	clock      *clockFunc
+	store      *MemoryStore
+	auth       *Authority
+	agents     *fakeAgents
+	authorizer *fakeAuthorizer
+	svc        *Service
 }
 
 func newHarness(t *testing.T) *harness {

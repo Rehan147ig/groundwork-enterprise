@@ -42,7 +42,7 @@ func TestExecuteFiltersACLConcurrently(t *testing.T) {
 		Config: TimeoutConfig{
 			Total:        500 * time.Millisecond,
 			QdrantSearch: 80 * time.Millisecond,
-			ACLCheck: 150 * time.Millisecond,
+			ACLCheck:     150 * time.Millisecond,
 			AuditWrite:   30 * time.Millisecond,
 		},
 		Backend: fakeRetrieval{candidates: candidates},
@@ -162,7 +162,7 @@ func TestExecuteFailsClosedOnRetrievalTimeout(t *testing.T) {
 		Config: TimeoutConfig{
 			Total:        300 * time.Millisecond,
 			QdrantSearch: 20 * time.Millisecond,
-			ACLCheck: 60 * time.Millisecond,
+			ACLCheck:     60 * time.Millisecond,
 			AuditWrite:   30 * time.Millisecond,
 		},
 		Backend: slowRetrieval{delay: 80 * time.Millisecond},
@@ -190,7 +190,7 @@ func TestExecuteFailsClosedWhenACLCircuitOpen(t *testing.T) {
 		Config: TimeoutConfig{
 			Total:        300 * time.Millisecond,
 			QdrantSearch: 80 * time.Millisecond,
-			ACLCheck: 60 * time.Millisecond,
+			ACLCheck:     60 * time.Millisecond,
 			AuditWrite:   30 * time.Millisecond,
 		},
 		Backend: fakeRetrieval{candidates: []runtime.Candidate{{
@@ -475,7 +475,7 @@ func testTimeouts() TimeoutConfig {
 	return TimeoutConfig{
 		Total:        300 * time.Millisecond,
 		QdrantSearch: 20 * time.Millisecond,
-		ACLCheck: 60 * time.Millisecond,
+		ACLCheck:     60 * time.Millisecond,
 		AuditWrite:   30 * time.Millisecond,
 	}
 }
