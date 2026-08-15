@@ -2,16 +2,17 @@ module groundwork/query-runtime
 
 go 1.25.8
 
-// Patched toolchain: fixes stdlib advisories in crypto/tls (go1.26.5),
-// net/textproto and crypto/x509 (go1.26.4) that 1.26.3 ships with.
-toolchain go1.26.5
+// Patched toolchain: fixes stdlib advisories in crypto/tls, net/http,
+// html/template, net/url, encoding/xml, encoding/asn1 (go1.26.6)
+// that go1.26.5 ships with (GO-2026-6088/6089/6090/6091/6218, GO-2026-5972).
+toolchain go1.26.6
 
 require (
 	github.com/authzed/authzed-go v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/prometheus/client_golang v1.20.5
-	golang.org/x/crypto v0.50.0
+	golang.org/x/crypto v0.51.0
 	google.golang.org/grpc v1.82.1
 )
 
@@ -32,9 +33,9 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
