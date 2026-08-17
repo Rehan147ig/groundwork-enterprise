@@ -17,7 +17,7 @@
 //	SPICEDB_TOKEN                     SpiceDB preshared key (optional)
 //	SPICEDB_INSECURE                  true = plaintext gRPC, dev only (default true)
 //	SPICEDB_CA_FILE                   custom CA bundle (internal PKI; TLS mode)
-//	SPICEDB_CONSISTENCY               read consistency (default minimize_latency)
+//	SPICEDB_CONSISTENCY               read consistency (default at_least_as_fresh)
 //	SPICEDB_CIRCUIT_*                 breaker tuning (failure limit / open timeout ms /
 //	                                  half-open limit)
 //	ACL_SYNC_METRICS_ADDR             expose Prometheus /metrics (optional, e.g. :9090)
@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 
 	"groundwork/query-runtime/internal/aclsync"
 	"groundwork/query-runtime/internal/aclsync/msgraph"
+	"groundwork/query-runtime/internal/keyring"
 	"groundwork/query-runtime/internal/metrics"
 	"groundwork/query-runtime/internal/relationship"
 	"groundwork/query-runtime/internal/relationship/spicedb"
@@ -87,17 +89,76 @@ func main() {
 			TenantID:         os.Getenv("MS_GRAPH_TENANT_ID"),
 			ClientID:         os.Getenv("MS_GRAPH_CLIENT_ID"),
 			ClientSecret:     os.Getenv("MS_GRAPH_CLIENT_SECRET"),
+			ClientSecretRef:  os.Getenv("MS_GRAPH_CLIENT_SECRET_REF"),
 			SiteID:           os.Getenv("MS_GRAPH_SITE_ID"),
 			DriveID:          os.Getenv("MS_GRAPH_DRIVE_ID"),
 			AuthorityHost:    os.Getenv("MS_GRAPH_AUTHORITY_HOST"),
 			DeltaPollSeconds: envInt("ACL_SYNC_INTERVAL_SECONDS", 60),
 			Enabled:          true,
 		}
+		// Credential policy gate: production runs on a resolving
+		// keyring:// reference with tenant-scoped resolution.
+		// Requirements in production:
+		//   - GROUNDWORK_ENV=production
+		//   - DATABASE_URL (for DB-backed keyring)
+		//   - GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 (for envelope encryption)
+		//   - TENANT_ID (for per-tenant connector secret namespace)
+		//   - MS_GRAPH_CLIENT_SECRET_REF matching keyring://connector/<id>
+		production := strings.EqualFold(os.Getenv("GROUNDWORK_ENV"), "production")
+		graphClient := msgraph.NewHTTPGraphClient(graphCfg)
+		if graphCfg.ClientSecretRef != "" {
+			var dbOpts *keyring.DBKeyProviderOptions
+			if production {
+				// Validate required production environment
+				if os.Getenv("DATABASE_URL") == "" {
+					logger.Error("production requires DATABASE_URL for DB-backed keyring")
+					os.Exit(1)
+				}
+				if os.Getenv("GROUNDWORK_KEK_REF") == "" && os.Getenv("GROUNDWORK_KEK_BASE64") == "" {
+					logger.Error("production requires GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 for key encryption")
+					os.Exit(1)
+				}
+				if cfg.TenantID == "" {
+					logger.Error("production requires TENANT_ID (ACL_SYNC_TENANT_ID) for tenant-scoped connector secrets")
+					os.Exit(1)
+				}
+				dbOpts = keyring.BuildDBKeyProviderOptions()
+				if dbOpts == nil {
+					logger.Error("failed to build DB keyring options in production")
+					os.Exit(1)
+				}
+				dbOpts.TenantID = cfg.TenantID
+				defer keyring.CloseDB(dbOpts.DB)
+			}
+			secretResolver, expiry, err := keyring.GuardConnectorSecret(context.Background(), production, graphCfg.ClientSecret, graphCfg.ClientSecretRef, dbOpts)
+			if err != nil {
+				logger.Error("connector credential gate failed; refusing to start", "err", err.Error())
+				os.Exit(1)
+			}
+			graphCfg.CredentialExpiry = expiry
+			if secretResolver != nil {
+				// Scope resolver to the sync tenant for per-tenant keyring lookups
+				if production && cfg.TenantID != "" {
+					secretResolver = secretResolver.WithTenant(cfg.TenantID)
+				}
+				graphClient.SetSecretResolver(secretResolver)
+				logger.Info("msgraph connector credentials resolve via keyring reference", "ref_scheme", "keyring", "tenant", cfg.TenantID)
+			} else {
+				graphClient.SetSecretResolver(msgraph.NewEnvSecretResolver())
+				logger.Info("msgraph connector credentials resolve via env reference (local/dev only)")
+			}
+		} else if graphCfg.ClientSecret != "" {
+			if production {
+				logger.Error("MS_GRAPH_CLIENT_SECRET supplied as plaintext env, which is forbidden in production; set MS_GRAPH_CLIENT_SECRET_REF=keyring://connector/msgraph")
+				os.Exit(1)
+			}
+			logger.Warn("MS_GRAPH_CLIENT_SECRET supplied as plaintext env; production requires MS_GRAPH_CLIENT_SECRET_REF=keyring://…")
+		}
 		var deltaStore msgraph.DeltaTokenStore = msgraph.NewMemoryDeltaTokenStore()
 		if dir := os.Getenv("ACL_DELTA_TOKEN_DIR"); dir != "" {
 			deltaStore = msgraph.NewFileDeltaTokenStore(dir)
 		}
-		graphConnector := msgraph.NewConnector(msgraph.NewHTTPGraphClient(graphCfg), graphCfg, logger, deltaStore)
+		graphConnector := msgraph.NewConnector(graphClient, graphCfg, logger, deltaStore)
 		graphConnector.SetCanonicalIdentity(resolver, canonicalIdentity)
 		connector = graphConnector
 		logger.Info("spicedb-sync using Microsoft Graph connector", "site_id", graphCfg.SiteID, "drive_id", graphCfg.DriveID, "canonical_identity", canonicalIdentity)
@@ -111,17 +172,14 @@ func main() {
 		logger.Error("SPICEDB_ENDPOINT is required (e.g. 127.0.0.1:50051)")
 		os.Exit(1)
 	}
-	var opts []spicedb.Option
-	if env("SPICEDB_INSECURE", "true") == "true" {
-		opts = append(opts, spicedb.WithInsecurePlaintext())
+	opts, tlsErr := spicedb.EnvOptions()
+	if tlsErr != nil {
+		logger.Error("failed to configure spicedb transport", "err", tlsErr)
+		os.Exit(1)
 	}
-	if caFile := os.Getenv("SPICEDB_CA_FILE"); caFile != "" {
-		caPEM, err := os.ReadFile(caFile)
-		if err != nil {
-			logger.Error("failed to read SPICEDB_CA_FILE", "err", err)
-			os.Exit(1)
-		}
-		opts = append(opts, spicedb.WithCA(caPEM))
+	if env("SPICEDB_INSECURE", "") == "true" &&
+		os.Getenv("SPICEDB_TLS_CA") == "" && os.Getenv("SPICEDB_TLS_CERT") == "" {
+		opts = append(opts, spicedb.WithInsecurePlaintext())
 	}
 	if mode := os.Getenv("SPICEDB_CONSISTENCY"); mode != "" {
 		opts = append(opts, spicedb.WithConsistency(mode))

@@ -89,6 +89,13 @@ jobs:
           fi
           echo "no dynamic SQL in production code"
 
+      - name: Connector production-claims gate
+        # A connector may declare Status: "production" only after a
+        # verified production hardening review (allowlist in the
+        # script). Every allowlisted connector must keep the flag.
+        working-directory: .
+        run: bash scripts/check-connector-production-claims.sh
+
       - name: govulncheck (supply-chain vulnerability scan)
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 

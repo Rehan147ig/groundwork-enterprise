@@ -5,8 +5,11 @@
 // ACL_SYNC_MODE=watch        : perform an initial sync, then continuously apply
 // permission changes and periodically reconcile + check drift until SIGINT/SIGTERM.
 //
-// Currently uses the mock connector (ACL_CONNECTOR_TYPE=mock); real Microsoft Graph /
-// Okta / Google connectors plug in behind the same aclsync.Connector interface later.
+// Connectors implement the versioned connector contract
+// (internal/aclsync/contract, Milestone 4): at startup the connector's
+// descriptor is validated (contract.Validate) and its credential
+// reference is checked against its auth spec — a connector that fails
+// the contract refuses to run.
 //
 // Environment:
 //
@@ -19,7 +22,7 @@
 //	SPICEDB_TOKEN                     SpiceDB preshared key
 //	SPICEDB_INSECURE_PLAINTEXT=true   dev only, no TLS
 //	SPICEDB_CA_FILE                   custom CA bundle (internal PKI)
-//	SPICEDB_CONSISTENCY               read consistency (default minimize_latency)
+//	SPICEDB_CONSISTENCY               read consistency (default at_least_as_fresh)
 //	SPICEDB_CIRCUIT_*                 breaker tuning (failure limit / open timeout ms /
 //	                                  half-open limit)
 //	ACL_SYNC_METRICS_ADDR             expose Prometheus /metrics (optional, e.g. :9090)
@@ -33,13 +36,16 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"groundwork/query-runtime/internal/aclsync"
+	"groundwork/query-runtime/internal/aclsync/contract"
 	"groundwork/query-runtime/internal/aclsync/msgraph"
+	"groundwork/query-runtime/internal/keyring"
 	"groundwork/query-runtime/internal/metrics"
 	"groundwork/query-runtime/internal/relationship"
 	"groundwork/query-runtime/internal/relationship/spicedb"
@@ -82,7 +88,29 @@ func main() {
 		if canonicalIdentity {
 			logger.Warn("GROUNDWORK_CANONICAL_IDENTITY=true but connector is mock; mock emits raw user tuples (canonical principals are only synced by real connectors)")
 		}
-		connector = aclsync.NewMockConnector()
+		// The mock source participates in the versioned contract via the
+		// SDK adapter (it cannot import the contract package itself —
+		// aclsync must stay contract-free).
+		connector = contract.WrapConnector(aclsync.NewMockConnector(), contract.ProviderDescriptor{
+			Provider:        "mock",
+			ContractVersion: contract.Version,
+			// Literal string: the CI production-claims check audits this.
+			Status: "experimental",
+			Auth:   contract.AuthSpec{Method: contract.AuthNone},
+			Capabilities: []contract.Capability{
+				contract.CapabilityGroups,
+				contract.CapabilityFolders,
+				contract.CapabilityInheritance,
+				contract.CapabilityEffectivePermissions,
+			},
+			SupportedSubset:         "synthetic enterprise dataset (users, nested groups, folders, documents); no external identities, no deltas — correctness rests on full reconcile",
+			FailClosedOutsideSubset: true,
+			Retry: contract.RetryPolicy{
+				Base:           250 * time.Millisecond,
+				Max:            5 * time.Second,
+				DefaultTimeout: 10 * time.Second,
+			},
+		})
 	case "msgraph":
 		if os.Getenv("MS_GRAPH_CONNECTOR_ENABLED") != "true" {
 			logger.Error("msgraph connector selected but MS_GRAPH_CONNECTOR_ENABLED is not 'true'")
@@ -92,24 +120,104 @@ func main() {
 			TenantID:         os.Getenv("MS_GRAPH_TENANT_ID"),
 			ClientID:         os.Getenv("MS_GRAPH_CLIENT_ID"),
 			ClientSecret:     os.Getenv("MS_GRAPH_CLIENT_SECRET"),
+			ClientSecretRef:  os.Getenv("MS_GRAPH_CLIENT_SECRET_REF"),
 			SiteID:           os.Getenv("MS_GRAPH_SITE_ID"),
 			DriveID:          os.Getenv("MS_GRAPH_DRIVE_ID"),
 			AuthorityHost:    os.Getenv("MS_GRAPH_AUTHORITY_HOST"),
 			DeltaPollSeconds: envInt("ACL_SYNC_INTERVAL_SECONDS", 60),
 			Enabled:          true,
 		}
-		var deltaStore msgraph.DeltaTokenStore = msgraph.NewMemoryDeltaTokenStore()
-		if dir := os.Getenv("ACL_DELTA_TOKEN_DIR"); dir != "" {
-			deltaStore = msgraph.NewFileDeltaTokenStore(dir)
+		// Credential policy gate: in production the connector must run
+		// on a keyring:// reference that resolves NOW (plaintext
+		// MS_GRAPH_CLIENT_SECRET and env:// refs are startup errors);
+		// local/dev keeps the env fallback. The resolver is INJECTED
+		// into the Graph client — there is no silent env fallback at
+		// token-fetch time.
+		production := strings.EqualFold(os.Getenv("GROUNDWORK_ENV"), "production")
+		graphClient := msgraph.NewHTTPGraphClient(graphCfg)
+		if graphCfg.ClientSecretRef != "" {
+			var dbOpts *keyring.DBKeyProviderOptions
+			if production {
+				dbOpts = keyring.BuildDBKeyProviderOptions()
+				if dbOpts == nil {
+					logger.Error("production requires DATABASE_URL and GROUNDWORK_KEK_REF (or GROUNDWORK_KEK_BASE64) for DB-backed keyring")
+					os.Exit(1)
+				}
+				dbOpts.TenantID = cfg.TenantID // per-tenant namespace
+				defer keyring.CloseDB(dbOpts.DB)
+			}
+			secretResolver, expiry, err := keyring.GuardConnectorSecret(context.Background(), production, graphCfg.ClientSecret, graphCfg.ClientSecretRef, dbOpts)
+			if err != nil {
+				logger.Error("connector credential gate failed; refusing to start", "err", err.Error())
+				os.Exit(1)
+			}
+			graphCfg.CredentialExpiry = expiry
+			if secretResolver != nil {
+				// Scope resolver to the sync tenant for per-tenant keyring lookups
+				if production && cfg.TenantID != "" {
+					secretResolver = secretResolver.WithTenant(cfg.TenantID)
+				}
+				graphClient.SetSecretResolver(secretResolver)
+				logger.Info("msgraph connector credentials resolve via keyring reference", "ref_scheme", "keyring")
+			} else {
+				graphClient.SetSecretResolver(msgraph.NewEnvSecretResolver())
+				logger.Info("msgraph connector credentials resolve via env reference (local/dev only)")
+			}
+			if !expiry.IsZero() {
+				logger.Info("msgraph connector credential expiry recorded", "expires_at", expiry.UTC().Format(time.RFC3339))
+			}
+		} else if graphCfg.ClientSecret != "" {
+			if production {
+				logger.Error("MS_GRAPH_CLIENT_SECRET supplied as plaintext env, which is forbidden in production; set MS_GRAPH_CLIENT_SECRET_REF=keyring://connector/msgraph")
+				os.Exit(1)
+			}
+			logger.Warn("MS_GRAPH_CLIENT_SECRET supplied as plaintext env; production requires MS_GRAPH_CLIENT_SECRET_REF=keyring://…")
+		}
+		graphConnector := msgraph.NewConnector(graphClient, graphCfg, logger, nil)
+		// Production-grade stores: durable delta cursor + permission
+		// snapshots + installation health in Postgres (migration 032)
+		// when DATABASE_URL is set; memory stores otherwise (dev/demo).
+		if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+			db, err := sql.Open("pgx", databaseURL)
+			if err != nil {
+				logger.Error("failed to open database for msgraph stores", "err", err)
+				os.Exit(1)
+			}
+			defer func() { _ = db.Close() }()
+			graphConnector.SetInstallationStore(aclsync.NewPostgresInstallationStore(db))
+			graphConnector.SetSnapshotStore(msgraph.NewPostgresPermissionSnapshotStore(db))
+			graphConnector.SetDeltaTokenStore(msgraph.NewPostgresDeltaTokenStore(db))
+			logger.Info("msgraph connector using Postgres delta cursor, snapshots and installation registry")
+		} else {
+			graphConnector.SetSnapshotStore(msgraph.NewMemoryPermissionSnapshotStore())
+			logger.Warn("DATABASE_URL unset; msgraph delta cursor is in-memory and health tracking is disabled (dev only)")
 		}
 		// Secrets are never logged; only non-sensitive identifiers.
-		graphConnector := msgraph.NewConnector(msgraph.NewHTTPGraphClient(graphCfg), graphCfg, logger, deltaStore)
 		graphConnector.SetCanonicalIdentity(resolver, canonicalIdentity)
 		connector = graphConnector
 		logger.Info("acl-sync using Microsoft Graph connector", "site_id", graphCfg.SiteID, "drive_id", graphCfg.DriveID, "canonical_identity", canonicalIdentity)
 	default:
 		logger.Error("unsupported connector type", "type", connectorType, "supported", "mock|msgraph")
 		os.Exit(1)
+	}
+
+	// Milestone 4 contract gate: a versioned connector must pass the
+	// contract validation at startup (descriptor, capabilities, secret
+	// refs) or the sync refuses to run — the contract is enforced at
+	// runtime, not just in tests.
+	if vc, ok := connector.(contract.VersionedConnector); ok {
+		if err := contract.Validate(vc); err != nil {
+			logger.Error("connector fails the versioned contract; refusing to run", "err", err.Error())
+			os.Exit(1)
+		}
+		d := vc.Descriptor()
+		logger.Info("connector contract validated",
+			"provider", d.Provider, "contract_version", d.ContractVersion,
+			"capabilities", len(d.Capabilities), "fail_closed_outside_subset", d.FailClosedOutsideSubset)
+		if ref := os.Getenv("MS_GRAPH_CLIENT_SECRET_REF"); ref != "" && !contract.SecretRefOK(d, ref) {
+			logger.Error("credential reference is not acceptable for the connector's auth spec", "ref", ref)
+			os.Exit(1)
+		}
 	}
 
 	// Write target: SpiceDB.
@@ -124,16 +232,9 @@ func main() {
 	spicedbEndpoint := os.Getenv("SPICEDB_ENDPOINT")
 
 	buildSpiceDB := func() (*spicedb.Client, error) {
-		var opts []spicedb.Option
-		if os.Getenv("SPICEDB_INSECURE_PLAINTEXT") == "true" {
-			opts = append(opts, spicedb.WithInsecurePlaintext())
-		}
-		if caFile := os.Getenv("SPICEDB_CA_FILE"); caFile != "" {
-			caPEM, err := os.ReadFile(caFile)
-			if err != nil {
-				return nil, err
-			}
-			opts = append(opts, spicedb.WithCA(caPEM))
+		opts, err := spicedb.EnvOptions()
+		if err != nil {
+			return nil, err
 		}
 		if mode := os.Getenv("SPICEDB_CONSISTENCY"); mode != "" {
 			opts = append(opts, spicedb.WithConsistency(mode))

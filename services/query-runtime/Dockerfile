@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine
+FROM golang:1.26-alpine
 WORKDIR /src
 RUN apk add --no-cache build-base
 ENV GOCACHE=/tmp/go-build

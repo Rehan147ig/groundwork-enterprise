@@ -15,7 +15,7 @@ SHELL := /bin/bash
 COMPOSE_DEV   := docker compose -f infra/docker-compose.yml
 COMPOSE_PILOT := docker compose -f infra/docker-compose.yml -f infra/docker-compose.codespace.yml
 
-.PHONY: help demo up down clean seed verify connector-enumerate
+.PHONY: help demo up down clean seed verify connector-enumerate provider-build provider-test provider-acctest
 
 help:                                ## Show this help
 	@echo "Groundwork targets:"
@@ -50,6 +50,17 @@ verify:                              ## Persona acceptance gate (the keystone mo
 
 demo: up seed verify                 ## End-to-end: stack + seed + verify
 	@echo "✅ Demo ready"
+
+# -- Terraform provider (Milestone 6) ---------------------------------------------------
+
+provider-build:                       ## Build the groundwork Terraform provider
+	cd terraform-provider-groundwork && go build ./...
+
+provider-test:                        ## Unit tests for the Terraform provider
+	cd terraform-provider-groundwork && go vet ./... && go test ./...
+
+provider-acctest:                     ## Acceptance tests (requires TF_ACC + GW_API_BASE_URL + GW_API_KEY)
+	cd terraform-provider-groundwork && TF_ACC=1 go test ./internal/provider/
 
 # -- MS Graph pilot (scaffold) ---------------------------------------------------------
 

@@ -21,10 +21,11 @@ func TestMissingEnvVars(t *testing.T) {
 
 func TestValidConfig(t *testing.T) {
 	env := map[string]string{
-		"MSGRAPH_TENANT_ID":     "tenant-id-value",
-		"MSGRAPH_CLIENT_ID":     "client-id-value",
-		"MSGRAPH_CLIENT_SECRET": "client-secret-value",
-		"DATABASE_URL":          "postgres://groundwork:groundwork@postgres:5432/groundwork",
+		"MSGRAPH_TENANT_ID":         "tenant-id-value",
+		"MSGRAPH_CLIENT_ID":         "client-id-value",
+		"MSGRAPH_CLIENT_SECRET":     "client-secret-value",
+		"MSGRAPH_CLIENT_SECRET_REF": "keyring://connector/msgraph",
+		"DATABASE_URL":              "postgres://groundwork:groundwork@postgres:5432/groundwork",
 	}
 	if missing := validate(func(k string) string { return env[k] }); len(missing) != 0 {
 		t.Fatalf("expected no missing env vars with valid config, got: %v", missing)
@@ -37,10 +38,11 @@ func TestValidConfig(t *testing.T) {
 // for the msgraph-connector service).
 func TestValidConfigWithPostgresUrlFallback(t *testing.T) {
 	env := map[string]string{
-		"MSGRAPH_TENANT_ID":     "tenant-id-value",
-		"MSGRAPH_CLIENT_ID":     "client-id-value",
-		"MSGRAPH_CLIENT_SECRET": "client-secret-value",
-		"POSTGRES_URL":          "postgres://groundwork:groundwork@postgres:5432/groundwork",
+		"MSGRAPH_TENANT_ID":         "tenant-id-value",
+		"MSGRAPH_CLIENT_ID":         "client-id-value",
+		"MSGRAPH_CLIENT_SECRET":     "client-secret-value",
+		"MSGRAPH_CLIENT_SECRET_REF": "keyring://connector/msgraph",
+		"POSTGRES_URL":              "postgres://groundwork:groundwork@postgres:5432/groundwork",
 	}
 	getter := func(k string) string { return env[k] }
 	if missing := validate(getter); len(missing) != 0 {
@@ -71,10 +73,10 @@ func TestPartiallyMissing(t *testing.T) {
 		"MSGRAPH_TENANT_ID": "tenant-id-value",
 		"MSGRAPH_CLIENT_ID": "client-id-value",
 		"DATABASE_URL":      "postgres://groundwork:groundwork@postgres:5432/groundwork",
-		// MSGRAPH_CLIENT_SECRET intentionally unset.
+		// MSGRAPH_CLIENT_SECRET and MSGRAPH_CLIENT_SECRET_REF intentionally unset.
 	}
 	missing := validate(func(k string) string { return env[k] })
-	if len(missing) != 1 {
-		t.Fatalf("expected 1 missing env var, got %d: %v", len(missing), missing)
+	if len(missing) != 2 {
+		t.Fatalf("expected 2 missing env vars, got %d: %v", len(missing), missing)
 	}
 }

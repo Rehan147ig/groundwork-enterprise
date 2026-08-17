@@ -50,7 +50,11 @@ func main() {
 	logger.Info("Successfully fetched permissions", "users", len(ps.Users), "groups", len(ps.Groups), "repos", len(ps.Documents), "tuples", len(tuples))
 
 	// Write to SpiceDB through the relationship store adapter
-	var opts []spicedb.Option
+	opts, tlsErr := spicedb.EnvOptions()
+	if tlsErr != nil {
+		logger.Error("Failed to configure SpiceDB transport", "error", tlsErr)
+		os.Exit(1)
+	}
 	if *insecure {
 		opts = append(opts, spicedb.WithInsecurePlaintext())
 	}

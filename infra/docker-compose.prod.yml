@@ -55,11 +55,19 @@ services:
       QDRANT_CIRCUIT_FAILURE_LIMIT: "3"
       QDRANT_CIRCUIT_OPEN_TIMEOUT_MS: "10000"
       QDRANT_CIRCUIT_HALF_OPEN_LIMIT: "1"
-      SPICEDB_ENDPOINT: http://spicedb:50051
+      SPICEDB_ENDPOINT: dns:///spicedb:50051
       SPICEDB_TOKEN: ${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY}
-      SPICEDB_INSECURE_PLAINTEXT: "true"
+      # Transport: encrypted gRPC over the internal CA. The client pins
+      # the server identity with SPICEDB_TLS_CA and presents the shared
+      # mTLS client cert (SPICEDB_TLS_CERT/KEY), which SpiceDB verifies
+      # when the deployment enforces client certificates.
+      SPICEDB_INSECURE_PLAINTEXT: "false"
+      SPICEDB_TLS_CA: /certs/ca.crt
+      SPICEDB_TLS_CERT: /certs/client.crt
+      SPICEDB_TLS_KEY: /certs/client.key
       # Immutable, hash-chained audit ledger (synchronous, fail-closed on write error).
-      DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
+      # PostgreSQL serves TLS (ssl=on); require encryption on the wire.
+      DATABASE_URL: postgres://groundwork:${GROUNDWORK_DB_PASSWORD:?set GROUNDWORK_DB_PASSWORD}@postgres:5432/groundwork?sslmode=require
       # Secrets MUST be supplied (compose fails fast if missing). Never commit real values.
       BOOTSTRAP_API_KEY: ${GROUNDWORK_BOOTSTRAP_API_KEY:?set GROUNDWORK_BOOTSTRAP_API_KEY}
       BOOTSTRAP_TENANT_ID: ${GROUNDWORK_BOOTSTRAP_TENANT_ID:-acme}
@@ -67,8 +75,16 @@ services:
       # PRODUCTION IDENTITY: a verified OIDC/JWT is required for every query. ALLOW_DEMO_IDENTITY
       # is intentionally NOT set here, so a raw user_id is never trusted in production.
       GROUNDWORK_JWT_HS_SECRET: ${GROUNDWORK_JWT_HS_SECRET:?set GROUNDWORK_JWT_HS_SECRET or switch to GROUNDWORK_JWT_RS_PUBLIC_KEY}
+      # The governed-flow delegation authority (v1/governance*, MCP,
+      # /v1/query delegation) refuses to start without a signing key.
+      # Default to the JWT secret so a single secret works; override
+      # GROUNDWORK_DELEGATION_HS_SECRET to use a distinct one.
+      GROUNDWORK_DELEGATION_HS_SECRET: ${GROUNDWORK_JWT_HS_SECRET}
       # GROUNDWORK_JWT_ISSUER: https://your-idp/
       # GROUNDWORK_JWT_AUDIENCE: groundwork
+      GROUNDWORK_OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
+      GROUNDWORK_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+      GROUNDWORK_ENV: production
       IDK_THRESHOLD: "0.70"
       VECTOR_WEIGHT: "0.60"
       KEYWORD_WEIGHT: "0.40"
@@ -81,6 +97,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    volumes:
+      - ./certs:/certs:ro
     networks:
       - groundwork
 
@@ -99,6 +117,13 @@ services:
       QUERY_RUNTIME_URL: http://query-runtime:8080
       INGESTION_RUNTIME_URL: http://ingestion:8000
       NEXT_PUBLIC_APP_NAME: Groundwork
+      GROUNDWORK_API_KEY: ${GROUNDWORK_BOOTSTRAP_API_KEY:?set GROUNDWORK_BOOTSTRAP_API_KEY}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
+      GROUNDWORK_ENV: production
     depends_on:
       - query-runtime
     networks:
@@ -122,9 +147,13 @@ services:
       EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
       EMBEDDING_CACHE_DIR: /models/fastembed
       BOOTSTRAP_STORAGE: "true"
-      SPICEDB_ENDPOINT: http://spicedb:50051
+      # Ingestion writes relationships over SpiceDB's HTTP gateway
+      # (--http-addr 8443), not gRPC, so it does not need the mTLS
+      # client cert — but it must not claim plaintext gRPC either.
+      SPICEDB_ENDPOINT: http://spicedb:8443
       SPICEDB_TOKEN: ${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY}
-      SPICEDB_INSECURE_PLAINTEXT: "true"
+      SPICEDB_INSECURE_PLAINTEXT: "false"
+      GROUNDWORK_ENV: production
     depends_on:
       qdrant:
         condition: service_started
@@ -145,9 +174,18 @@ services:
     # NOTE: no `ports:` — internal only. Direct DB access from outside is impossible.
     expose:
       - "5432"
+    # TLS with the internally-generated CA: ssl=on with certificate/key
+    # and ssl_ca_file so client-certificate verification is supported.
+    # The key ships from a read-only bind mount whose mode bits are not
+    # preserved (Windows/WSL), so copy it to a writable tmp dir and pin
+    # it to 0600 before the server starts — PostgreSQL refuses loose keys.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "mkdir -p /tmp/gw-tls && cp /certs/postgres.crt /certs/postgres.key /certs/ca.crt /tmp/gw-tls/ && chmod 644 /tmp/gw-tls/postgres.crt /tmp/gw-tls/ca.crt && chmod 600 /tmp/gw-tls/postgres.key && chown postgres:postgres /tmp/gw-tls/postgres.key && exec /usr/local/bin/docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/gw-tls/postgres.crt -c ssl_key_file=/tmp/gw-tls/postgres.key -c ssl_ca_file=/tmp/gw-tls/ca.crt"
     environment:
       POSTGRES_USER: groundwork
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-groundwork}
+      POSTGRES_PASSWORD: ${GROUNDWORK_DB_PASSWORD:?set GROUNDWORK_DB_PASSWORD}
       POSTGRES_DB: groundwork
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U groundwork -d groundwork"]
@@ -156,6 +194,7 @@ services:
       retries: 12
       start_period: 20s
     volumes:
+      - ./certs:/certs:ro
       - postgres-data:/var/lib/postgresql/data
     networks:
       - groundwork
@@ -173,16 +212,70 @@ services:
     networks:
       - groundwork
 
+  # --- SpiceDB bootstrap: the relationship datastore is authoritative and
+  # MUST survive restarts, so SpiceDB runs against its own PostgreSQL
+  # database (never --datastore-engine memory). The two one-shot services
+  # below create the database and apply the schema migrations BEFORE the
+  # server starts; serve refuses to run against an unmigrated datastore,
+  # so ordering is enforced by depends_on conditions.
+
+  spicedb-db-init:
+    image: postgres:16
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until pg_isready -h postgres -U groundwork -d groundwork -q; do sleep 2; done;
+        psql -h postgres -U groundwork -d groundwork -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_database WHERE datname='spicedb'" | grep -q 1 ||
+        psql -h postgres -U groundwork -d groundwork -v ON_ERROR_STOP=1 -c "CREATE DATABASE spicedb"
+    environment:
+      PGPASSWORD: ${GROUNDWORK_DB_PASSWORD:?set GROUNDWORK_DB_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - groundwork
+
+  spicedb-migrate:
+    image: authzed/spicedb:v1.56.0
+    restart: "no"
+    command:
+      - migrate
+      - head
+      - --datastore-engine=postgres
+      - "postgres://groundwork:${GROUNDWORK_DB_PASSWORD:?set GROUNDWORK_DB_PASSWORD}@postgres:5432/spicedb?sslmode=require&sslcert=/certs/client.crt&sslkey=/certs/client.key&sslrootcert=/certs/ca.crt"
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      spicedb-db-init:
+        condition: service_completed_successfully
+    networks:
+      - groundwork
+
   spicedb:
-    image: authzed/spicedb:latest
+    # Pinned: newer/older tags have no gRPC TLS flags support guarantees.
+    # Modern SpiceDB serves TLS whenever cert/key are provided (the old
+    # --grpc-no-tls / --grpc-ca flags no longer exist); query-runtime
+    # pins the server identity via SPICEDB_TLS_CA and presents the
+    # shared mTLS client cert via SPICEDB_TLS_CERT/KEY.
+    image: authzed/spicedb:v1.56.0
     restart: unless-stopped
-    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-no-tls", "--grpc-preshared-key", "${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY}", "--log-format", "json"]
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--http-enabled", "--grpc-healthcheck", "--grpc-tls-cert-path", "/certs/spicedb.crt", "--grpc-tls-key-path", "/certs/spicedb.key", "--grpc-tls-client-ca-path", "/certs/ca.crt", "--grpc-preshared-key", "${SPICEDB_PRESHARED_KEY:?set SPICEDB_PRESHARED_KEY}", "--datastore-engine=postgres", "postgres://groundwork:${GROUNDWORK_DB_PASSWORD:?set GROUNDWORK_DB_PASSWORD}@postgres:5432/spicedb?sslmode=require&sslcert=/certs/client.crt&sslkey=/certs/client.key&sslrootcert=/certs/ca.crt", "--log-format", "json"]
     # NOTE: no `ports:` — internal only.
     expose:
       - "50051"
       - "8443"
-    environment:
-      SPICEDB_DATASTORE_ENGINE: memory
+    # The pinned image is a minimal Chainguard base with NO shell, so a
+    # CMD-SHELL healthcheck cannot run inside it. Readiness is therefore
+    # verified by query-runtime's readyz probe at startup (and by the
+    # operator with the -debug image — see docs/production-spicedb.md).
+    # --grpc-healthcheck above exposes the gRPC health service for
+    # external monitors (e.g. grpc_health_probe from a sidecar).
+    depends_on:
+      spicedb-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./certs:/certs:ro
     networks:
       - groundwork
 

@@ -1,0 +1,54 @@
+name: terraform-provider
+
+on:
+  push:
+    paths:
+      - "terraform-provider-groundwork/**"
+      - ".github/workflows/terraform-provider.yml"
+  pull_request:
+    paths:
+      - "terraform-provider-groundwork/**"
+
+defaults:
+  run:
+    working-directory: terraform-provider-groundwork
+
+jobs:
+  verify:
+    name: Verify provider (build, vet, fmt, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: terraform-provider-groundwork/go.mod
+          cache-dependency-path: terraform-provider-groundwork/go.sum
+      - name: gofmt
+        run: |
+          gofmt -l .
+          test -z "$(gofmt -l .)"
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test (unit)
+        run: go test ./...
+
+  acceptance:
+    name: Acceptance tests
+    runs-on: ubuntu-latest
+    needs: verify
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: terraform-provider-groundwork/go.mod
+          cache-dependency-path: terraform-provider-groundwork/go.sum
+      - uses: hashicorp/setup-terraform@v3
+      - name: Run acceptance tests
+        env:
+          TF_ACC: "1"
+          GW_API_BASE_URL: ${{ secrets.GW_API_BASE_URL }}
+          GW_API_KEY: ${{ secrets.GW_API_KEY }}
+        run: go test ./internal/provider/ -run TestAcc -v -timeout 30m

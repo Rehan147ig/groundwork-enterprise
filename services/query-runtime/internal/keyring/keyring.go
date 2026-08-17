@@ -32,6 +32,7 @@ const (
 	PurposeAuditDigest = "audit_digest" // audit chain digest key (phase 3)
 	PurposeDatabase    = "database"     // database encryption key reference
 	PurposeBackup      = "backup"       // backup encryption key reference
+	PurposeConnector   = "connector"    // connector credential metadata encryption (Milestone 3)
 )
 
 // KnownPurposes is the closed, sorted set of key purposes.
@@ -39,6 +40,7 @@ func KnownPurposes() []string {
 	return []string{
 		PurposeAuditDigest,
 		PurposeBackup,
+		PurposeConnector,
 		PurposeDatabase,
 		PurposeDelegation,
 		PurposeIdentity,
@@ -64,6 +66,7 @@ var (
 	ErrRotationUnsupported   = errors.New("keyring: this provider cannot rotate keys")
 	ErrInvalidPurpose        = errors.New("keyring: unknown purpose")
 	ErrProviderNotConfigured = errors.New("keyring: provider is not configured for this purpose")
+	ErrSecretNotFound        = errors.New("keyring: secret not found for tenant/connector")
 )
 
 // Key is one provisioned key for a purpose.
@@ -119,6 +122,9 @@ func New(provider KeyProvider) *Keyring {
 // adapters).
 func (k *Keyring) Provider() KeyProvider { return k.provider }
 
+// Source returns the provider's source identifier.
+func (k *Keyring) Source() string { return k.provider.Source() }
+
 // Get returns the current key for the purpose. Missing material
 // surfaces ErrKeyMissing (fail closed).
 func (k *Keyring) Get(ctx context.Context, purpose string) (Key, error) {
@@ -126,6 +132,15 @@ func (k *Keyring) Get(ctx context.Context, purpose string) (Key, error) {
 		return Key{}, ErrInvalidPurpose
 	}
 	return k.provider.Get(ctx, purpose)
+}
+
+// GetForVerification returns historical key material for the given
+// key_id. Delegates to the underlying provider.
+func (k *Keyring) GetForVerification(ctx context.Context, purpose, keyID string) (Key, error) {
+	if !IsKnownPurpose(purpose) {
+		return Key{}, ErrInvalidPurpose
+	}
+	return k.provider.GetForVerification(ctx, purpose, keyID)
 }
 
 // Rotate rotates the purpose key and records the rotation. Providers
@@ -222,6 +237,7 @@ var purposeEnv = map[string][]string{
 	PurposeAuditDigest: {"GROUNDWORK_AUDIT_DIGEST_KEY"},
 	PurposeDatabase:    {"GROUNDWORK_DATABASE_KEY_ID"},
 	PurposeBackup:      {"GROUNDWORK_BACKUP_KEY_ID"},
+	PurposeConnector:   {"GROUNDWORK_CONNECTOR_CREDENTIAL_KEY"},
 }
 
 func keyEnv(purpose string) []string {

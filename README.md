@@ -1,6 +1,8 @@
 # Groundwork
 
-**Enterprise governance layer for agentic AI.** Groundwork sits between AI applications and private data sources, enforcing live permissions, data residency, and audit requirements on every query — before any data reaches a model.
+**The Zero-Trust AI Context Firewall for agentic AI.**
+
+> **30 seconds to understand:** Every AI application you run is one retrieval away from leaking the data it should never reach. Groundwork is a runtime enforcement layer that sits between your AI apps/agents and private data — and it is the *only* path their data can travel. Every query is checked against **live permissions** (revocation is immediate, no caching), scrubbed by a **context firewall** (PII redaction, prompt-injection blocking, provenance watermarks), and written to an **immutable, verifiable audit chain**. If any enforcement layer fails, the request fails **closed** — zero chunks reach the model, and the denial is itself audited. There is no open fallback. If it isn't permitted right now, it is not retrievable right now — period.
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go)
@@ -17,6 +19,21 @@
 | Security | [![security-ci](https://github.com/Rehan147ig/groundwork-enterprise/actions/workflows/security-ci.yml/badge.svg)](https://github.com/Rehan147ig/groundwork-enterprise/actions/workflows/security-ci.yml) |
 
 Groundwork is **not** a RAG tool and **not** a chatbot. It is infrastructure — a runtime data access control plane.
+
+---
+
+## Console at a glance
+
+The CISO console puts the two most critical operations one click away.
+
+| Leak Report | Break-Glass |
+|---|---|
+| [![Console Leak Report](docs/images/console-leak-report.png)](docs/images/console-leak-report.png) | [![Break-Glass UI](docs/images/console-break-glass.png)](docs/images/console-break-glass.png) |
+
+*Screenshots captured from the local quickstart console (port 3000) — see [Quickstart](#quickstart-2-minutes) below. Re-capture them from your own stack after the seed completes.*
+
+- **Leak Report** — connector-backed scan showing documents that should be restricted but remain reachable in indexed external systems.
+- **Break-Glass** — open a time-bounded, reason-mandatory emergency admin grant; every open/revoke transition is hash-chained evidence.
 
 ---
 
@@ -92,7 +109,32 @@ groundwork/
 └── .github/workflows/        CI: Go, Python, console, compose, migration, security
 ```
 
-## Quickstart
+## Quickstart (2 minutes)
+
+One-command stack + the Python SDK. Prerequisites: Docker + Docker Compose.
+
+```bash
+# 1. Boot Postgres, SpiceDB, and the runtime + console, seeded with a demo org
+docker compose -f infra/docker-compose.quickstart.yml up -d
+
+# 2. The quickstart stack mints one fixed demo key
+export GROUNDWORK_API_KEY=gw_local_acme_key
+
+# 3. Install the Python SDK (LangChain extra optional)
+pip install -e "sdks/python[langchain]"
+```
+
+```python
+from groundwork import GroundworkClient
+
+client = GroundworkClient(base_url="http://localhost:8080", api_key="gw_local_acme_key")
+resp = client.query(question="What shipped last sprint?", user_id="alice@corp.com")
+print(resp.answer, len(resp.citations), resp.trace.immutable_digest)
+```
+
+Your first query was permission-checked against live ACLs, firewall-scrubbed, and written to the immutable audit chain. Try `GET /v1/audit/verify` to prove the chain is untampered. See the [Developer Reference](docs/README.md) for the full API, OpenAPI spec, and break-glass walkthrough.
+
+## Full Development Setup
 
 Prerequisites: Docker + Docker Compose, Go 1.23+, Python 3.11+, Node 18.17+.
 

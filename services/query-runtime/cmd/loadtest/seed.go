@@ -21,7 +21,10 @@ func newSpiceDBWriter(c config) (*spicedbWriter, error) {
 	if c.spicedbEndpoint == "" {
 		return nil, fmt.Errorf("SPICEDB_ENDPOINT is required for seed/setup mode (or -spicedb-endpoint)")
 	}
-	var opts []spicedb.Option
+	opts, err := spicedb.EnvOptions()
+	if err != nil {
+		return nil, err
+	}
 	if c.spicedbInsecure {
 		opts = append(opts, spicedb.WithInsecurePlaintext())
 	}

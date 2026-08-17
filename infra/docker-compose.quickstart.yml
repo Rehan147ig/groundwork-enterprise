@@ -1,0 +1,127 @@
+name: groundwork-quickstart
+
+# Zero-friction local quickstart: one command brings up the full
+# Groundwork trust plane (runtime + console + Postgres ledger + SpiceDB)
+# with the canonical Acme demo org pre-seeded. No images to build beyond
+# the runtime and console, no model downloads, no Qdrant/Elasticsearch.
+#
+#   docker compose -f infra/docker-compose.quickstart.yml up -d
+#
+# Then open http://localhost:3000 (console) and check
+#   curl http://localhost:8080/healthz   # HTTP 200
+# The `seed` service runs once and exits: it forces the embedded
+# groundwork.zed schema onto SpiceDB, syncs the Acme demo org (5 repos =
+# 5 document ACLs, teams, users), and hands the console a live leak
+# report (engineering-team -> finance-budget exposure included).
+#
+# Reset everything with:
+#   docker compose -f infra/docker-compose.quickstart.yml down -v
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: groundwork
+      POSTGRES_PASSWORD: groundwork
+      POSTGRES_DB: groundwork
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U groundwork -d groundwork"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Applies the /migrations SQL migrations before the runtime boots, so
+  # the audit_log ledger + agent/governance/break-glass tables exist on
+  # first write. Idempotent: re-running on a migrated DB is a no-op.
+  db-migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Authorization backend. The runtime auto-migrates the schema: its
+  # /readyz deep check writes the embedded groundwork.zed (declarative +
+  # idempotent) and fails closed on drift — no manual SpiceDB step.
+  spicedb:
+    image: authzed/spicedb:latest
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-no-tls", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
+    environment:
+      SPICEDB_DATASTORE_ENGINE: memory
+    ports:
+      - "50051:50051"
+
+  query-runtime:
+    build:
+      context: ../services/query-runtime
+    environment:
+      QUERY_RUNTIME_ADDR: ":8080"
+      DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
+      BOOTSTRAP_API_KEY: gw_local_acme_key
+      BOOTSTRAP_TENANT_ID: acme
+      BOOTSTRAP_TENANT_REGION: US
+      SPICEDB_ENDPOINT: dns:///spicedb:50051
+      SPICEDB_TOKEN: groundwork-local
+      SPICEDB_INSECURE_PLAINTEXT: "true"
+      IMMUTABLE_AUDIT_SALT: quickstart_demo_salt_37840ed_valid
+      ALLOW_DEMO_IDENTITY: "true"
+      GROUNDWORK_ENV: local
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      spicedb:
+        condition: service_started
+
+  console:
+    build:
+      context: ..
+      dockerfile: apps/console/Dockerfile
+    environment:
+      QUERY_RUNTIME_URL: http://query-runtime:8080
+      GROUNDWORK_API_KEY: gw_local_acme_key
+      GROUNDWORK_DEMO_MODE: "true"
+      # Enterprise auth is OFF in the quickstart (no OIDC credentials):
+      # the local secret is a fixed dev value so NextAuth's session JWT
+      # path initializes. Override with real values for enterprise runs.
+      NEXTAUTH_SECRET: quickstart_console_dev_secret_do_not_use_in_prod
+      NEXT_PUBLIC_APP_NAME: Groundwork
+    ports:
+      - "3000:3000"
+    depends_on:
+      query-runtime:
+        condition: service_healthy
+
+  # One-shot seeder: waits for the runtime, deep-readies SpiceDB
+  # (schema auto-migrated), syncs the Acme demo org into SpiceDB and
+  # generates the leak report the console shows on first load.
+  seed:
+    image: curlimages/curl:8.10.1
+    volumes:
+      - ./scripts/seed_quickstart.sh:/seed.sh:ro
+    command: ["/bin/sh", "/seed.sh"]
+    environment:
+      QUICKSTART_RUNTIME_URL: http://query-runtime:8080
+      QUICKSTART_API_KEY: gw_local_acme_key
+    depends_on:
+      query-runtime:
+        condition: service_healthy
+    restart: "no"

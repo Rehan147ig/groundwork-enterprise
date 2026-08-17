@@ -27,17 +27,20 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver registers itself as "pgx"
 
 	"groundwork/query-runtime/internal/aclsync/msgraph"
+	"groundwork/query-runtime/internal/keyring"
 )
 
 var requiredEnv = []string{
 	"MSGRAPH_TENANT_ID",
 	"MSGRAPH_CLIENT_ID",
 	"MSGRAPH_CLIENT_SECRET",
+	"MSGRAPH_CLIENT_SECRET_REF",
 }
 
 // validate returns the names of required env vars that are unset or empty.
@@ -76,9 +79,69 @@ func main() {
 	}
 
 	cfg := msgraph.Config{
-		TenantID:     os.Getenv("MSGRAPH_TENANT_ID"),
-		ClientID:     os.Getenv("MSGRAPH_CLIENT_ID"),
-		ClientSecret: os.Getenv("MSGRAPH_CLIENT_SECRET"),
+		TenantID:        os.Getenv("MSGRAPH_TENANT_ID"),
+		ClientID:        os.Getenv("MSGRAPH_CLIENT_ID"),
+		ClientSecret:    os.Getenv("MSGRAPH_CLIENT_SECRET"),
+		ClientSecretRef: os.Getenv("MSGRAPH_CLIENT_SECRET_REF"),
+	}
+
+	// Credential policy gate: production runs on a resolving
+	// keyring:// reference with tenant-scoped resolution.
+	// Requirements in production:
+	//   - GROUNDWORK_ENV=production
+	//   - DATABASE_URL (for DB-backed keyring)
+	//   - GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 (for envelope encryption)
+	//   - TENANT_ID (MSGRAPH_TENANT_ID used as tenant ID for keyring namespace)
+	//   - MSGRAPH_CLIENT_SECRET_REF matching keyring://connector/<id>
+	production := strings.EqualFold(os.Getenv("GROUNDWORK_ENV"), "production")
+	graphClient := msgraph.NewHTTPGraphClient(cfg)
+	if cfg.ClientSecretRef != "" {
+		var dbOpts *keyring.DBKeyProviderOptions
+		if production {
+			// Validate required production environment
+			if os.Getenv("DATABASE_URL") == "" {
+				logger.Error("production requires DATABASE_URL for DB-backed keyring")
+				os.Exit(1)
+			}
+			if os.Getenv("GROUNDWORK_KEK_REF") == "" && os.Getenv("GROUNDWORK_KEK_BASE64") == "" {
+				logger.Error("production requires GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 for key encryption")
+				os.Exit(1)
+			}
+			if cfg.TenantID == "" {
+				logger.Error("production requires MSGRAPH_TENANT_ID for tenant-scoped connector secrets")
+				os.Exit(1)
+			}
+			dbOpts = keyring.BuildDBKeyProviderOptions()
+			if dbOpts == nil {
+				logger.Error("failed to build DB keyring options in production")
+				os.Exit(1)
+			}
+			dbOpts.TenantID = cfg.TenantID
+			defer keyring.CloseDB(dbOpts.DB)
+		}
+		secretResolver, expiry, err := keyring.GuardConnectorSecret(context.Background(), production, cfg.ClientSecret, cfg.ClientSecretRef, dbOpts)
+		if err != nil {
+			logger.Error("connector credential gate failed; refusing to start", "err", err.Error())
+			os.Exit(1)
+		}
+		cfg.CredentialExpiry = expiry
+		if secretResolver != nil {
+			// Scope resolver to the connector tenant for per-tenant keyring lookups
+			if production && cfg.TenantID != "" {
+				secretResolver = secretResolver.WithTenant(cfg.TenantID)
+			}
+			graphClient.SetSecretResolver(secretResolver)
+			logger.Info("msgraph connector credentials resolve via keyring reference", "ref_scheme", "keyring", "tenant", cfg.TenantID)
+		} else {
+			graphClient.SetSecretResolver(msgraph.NewEnvSecretResolver())
+			logger.Info("msgraph connector credentials resolve via env reference (local/dev only)")
+		}
+	} else if cfg.ClientSecret != "" {
+		if production {
+			logger.Error("MSGRAPH_CLIENT_SECRET supplied as plaintext env, which is forbidden in production; set MSGRAPH_CLIENT_SECRET_REF=keyring://connector/msgraph")
+			os.Exit(1)
+		}
+		logger.Warn("MSGRAPH_CLIENT_SECRET supplied as plaintext env; production requires MSGRAPH_CLIENT_SECRET_REF=keyring://…")
 	}
 
 	db, err := sql.Open("pgx", dbURL(os.Getenv))
@@ -96,7 +159,6 @@ func main() {
 		os.Exit(4)
 	}
 
-	graphClient := msgraph.NewHTTPGraphClient(cfg)
 	connector := msgraph.NewConnector(graphClient, cfg, logger, nil)
 	catalog := msgraph.NewPostgresCatalogWriter(db)
 

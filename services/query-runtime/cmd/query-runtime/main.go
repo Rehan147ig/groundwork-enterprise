@@ -28,8 +28,10 @@ import (
 	"groundwork/query-runtime/internal/governance"
 	"groundwork/query-runtime/internal/hybrid"
 	"groundwork/query-runtime/internal/keyring"
+	"groundwork/query-runtime/internal/leakreport"
 	"groundwork/query-runtime/internal/mcp"
 	gwmetrics "groundwork/query-runtime/internal/metrics"
+	"groundwork/query-runtime/internal/notifications"
 	"groundwork/query-runtime/internal/outbox"
 	"groundwork/query-runtime/internal/policy"
 	"groundwork/query-runtime/internal/relationship"
@@ -80,16 +82,9 @@ func main() {
 	var spicedbClient *spicedb.Client
 
 	buildSpiceDB := func(endpoint, token string, breaker *relationship.CircuitBreaker) (*spicedb.Client, error) {
-		var opts []spicedb.Option
-		if os.Getenv("SPICEDB_INSECURE_PLAINTEXT") == "true" {
-			opts = append(opts, spicedb.WithInsecurePlaintext())
-		}
-		if caFile := os.Getenv("SPICEDB_CA_FILE"); caFile != "" {
-			caPEM, err := os.ReadFile(caFile)
-			if err != nil {
-				return nil, fmt.Errorf("SPICEDB_CA_FILE: %w", err)
-			}
-			opts = append(opts, spicedb.WithCA(caPEM))
+		opts, err := spicedb.EnvOptions()
+		if err != nil {
+			return nil, fmt.Errorf("spicedb transport: %w", err)
 		}
 		if mode := os.Getenv("SPICEDB_CONSISTENCY"); mode != "" {
 			opts = append(opts, spicedb.WithConsistency(mode))
@@ -120,7 +115,7 @@ func main() {
 		relStore = spicedbClient
 		cfg.Authorizer = relAuth
 		log.Printf("relationship backend: spicedb (%s) consistency=%s circuit_breaker=%t",
-			endpoint, env("SPICEDB_CONSISTENCY", spicedb.ConsistencyMinimizeLatency), breaker != nil)
+			endpoint, env("SPICEDB_CONSISTENCY", spicedb.ConsistencyAtLeastAsFresh), breaker != nil)
 	} else {
 		log.Printf("relationship backend: none configured (SPICEDB_ENDPOINT unset) — in-memory demo mode")
 	}
@@ -510,6 +505,14 @@ func main() {
 		time.Duration(envInt("BREAK_GLASS_MAX_MINUTES", 60))*time.Minute,
 	)
 
+	// Milestone 5: notification delivery (Slack/Teams). Webhook URLs
+	// are tenant-scoped secret references (SLACK_WEBHOOK_URL[_<TENANT>],
+	// TEAMS_WORKFLOW_URL[_<TENANT>]) resolved per tenant at delivery
+	// time — never compiled into code. Interactive actions are signed
+	// (SLACK_SIGNING_SECRET), replay-protected, and role-checked against
+	// SLACK_ADMIN_USER_IDS[_<TENANT>].
+	notifier := notifications.NewFromEnv()
+
 	// Phase 8.1: tenant provisioning directory. The operator-managed
 	// directory (migration 027) is the tenant lifecycle source of
 	// truth: provisioning, disable/enable, and non-destructive
@@ -640,6 +643,17 @@ func main() {
 		})
 	}
 
+	// L1 policy cache readiness: when the in-process L1 layer is
+	// enabled, /readyz also verifies the decision cache is fully
+	// constructed. A zero-value cache silently bypasses the L1 fast
+	// path, so the probe fails and the pod is de-rotated.
+	if policyCache != nil {
+		server.AddReadinessProbe(runtime.ReadinessProbe{
+			Name:  "policy_cache",
+			Check: policyCache.Ping,
+		})
+	}
+
 	// Connector surface for the V1 console: POST /v1/connect/github
 	// (re-sync → relationship tuples) and GET /v1/leak-report (exposure scan).
 	// Uses a live GitHub client when GITHUB_TOKEN is set, else the Acme
@@ -650,11 +664,52 @@ func main() {
 	} else {
 		ghClient = github.NewMockClient()
 	}
+	ghOrg := env("GITHUB_ORG", "acme-financial")
 	server.SetGitHubService(connectorsvc.New(
 		ghClient,
-		env("GITHUB_ORG", "acme-financial"),
+		ghOrg,
 		relStore,
 	))
+
+	// Background leak-report scheduler: runs the exposure scan on the
+	// LEAK_REPORT_CRON cadence, persists every run into Postgres
+	// (leak_report_history, migration 031; bootstrapped here so a
+	// lagging migration never disables the surface) or memory in
+	// offline mode, and powers GET /v1/leak-report/history + /diff.
+	// The snapshot source mirrors the live endpoint's connector
+	// semantics (same org, same owner map), so scheduled snapshots are
+	// directly comparable to a manual scan.
+	var lrHistory leakreport.HistoryStore = leakreport.NewMemoryHistoryStore()
+	if auditDB != nil {
+		lrStore := leakreport.NewPostgresHistoryStore(auditDB)
+		bootCtx, cancelBoot := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := lrStore.Bootstrap(bootCtx); err != nil {
+			log.Printf("leak-report history: bootstrap: %v", err)
+		}
+		cancelBoot()
+		lrHistory = lrStore
+	}
+	var scanTenants []string
+	if envTenancy != nil {
+		scanTenants = envTenancy.Tenants()
+	}
+	if len(scanTenants) == 0 {
+		scanTenants = []string{cfg.BootstrapTenantID}
+	}
+	leakCron := env("LEAK_REPORT_CRON", "@every 6h")
+	leakScheduler, err := leakreport.NewScheduler(
+		leakCron,
+		lrHistory,
+		leakreport.SnapshotFunc(func(ctx context.Context, tenantID string) (aclsync.PermissionSet, error) {
+			return github.NewConnector(ghClient, ghOrg, nil).Snapshot(ctx, tenantID)
+		}),
+		scanTenants,
+		connectorsvc.AcmeOwners(),
+	)
+	if err != nil {
+		log.Fatalf("leak-report scheduler: %v", err)
+	}
+	server.SetLeakHistoryService(leakreport.NewHistoryService(lrHistory))
 
 	// Agent Registry + Governance are constructed above and shared by
 	// the REST runtime and the Cloud MCP endpoint (single registry, single
@@ -667,6 +722,7 @@ func main() {
 	// fail-closed before any outbound connection opens.
 	governanceService.SetUsageMeter(usageService)
 	server.SetBreakGlassService(breakGlassService)
+	server.SetNotifier(notifier)
 
 	// Phase 8.2: outbox backpressure. The outbox table is the bounded
 	// buffer between decisions and delivery; when the webhook is slow
@@ -761,6 +817,13 @@ func main() {
 		log.Printf("real-time ACL sync webhooks enabled (Entra ID + Okta), signature-authenticated")
 	}
 
+	// ---- Milestone 3: connector installation status (console status) ----
+	// /v1/connectors/status surfaces tenant connector health (status,
+	// last success, lag, drift, credential expiry) from the installation
+	// registry. Postgres-backed when DATABASE_URL is set (migration 032),
+	// in-memory otherwise.
+	server.SetConnectorStatusStore(buildConnectorStatusStore())
+
 	// Phase 3 outbox delivery worker: drains the transactional outbox
 	// (governance + agent registry lifecycle events) to the configured
 	// webhook, HMAC-signed. Only runs against a store that supports
@@ -821,6 +884,20 @@ func main() {
 				log.Printf("outbox worker stopped: %v", err)
 			}
 		}()
+	}
+
+	// Leak-report scheduler background loop (LEAK_REPORT_CRON cadence).
+	// Runs for the process lifetime; a cycle failure is logged and the
+	// next cadence proceeds. LEAK_REPORT_CRON=off/disabled turns the
+	// scheduler off while keeping the history/diff read surface.
+	if spec := leakCron; spec != "off" && spec != "disabled" {
+		go func() {
+			leakScheduler.Run(ctx, func(cycleErr error) {
+				log.Printf("leak-report scheduler: %v", cycleErr)
+			})
+		}()
+		log.Printf("leak-report scheduler enabled: cadence %s tenants=%v store=%T",
+			leakScheduler.Schedule(), scanTenants, lrHistory)
 	}
 
 	// Phase 8.5: key-expiry monitoring. Publishes the expiry timestamp
@@ -967,6 +1044,18 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 // Also returns the underlying *sql.DB (or nil for the in-memory case) so the
 // caller can construct an audit READER from the same handle — PR #22 wires
 // engine.PostgresAuditReader for /v1/audit* against this DB.
+// buildConnectorStatusStore returns the connector installation store
+// for /v1/connectors/status: Postgres-backed (migration 032) when
+// DATABASE_URL is set, in-memory otherwise.
+func buildConnectorStatusStore() aclsync.InstallationStore {
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		if db, err := sql.Open("pgx", url); err == nil {
+			return aclsync.NewPostgresInstallationStore(db)
+		}
+	}
+	return aclsync.NewMemoryInstallationStore()
+}
+
 func buildAuditWriter(databaseURL string, backend runtime.Backend, timeout time.Duration) (engine.AuditWriter, *sql.DB, func(), error) {
 	if databaseURL == "" {
 		return engine.RuntimeTraceAuditWriter{Trace: backend.Trace}, nil, func() {}, nil

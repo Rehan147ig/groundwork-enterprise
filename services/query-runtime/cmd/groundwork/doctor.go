@@ -123,11 +123,12 @@ func exitOKOrCheck(failures int) int {
 }
 
 func runChecks(opts doctorOptions) []checkResult {
-	results := make([]checkResult, 0, 10)
+	results := make([]checkResult, 0, 12)
 	results = append(results, checkDeployment(opts))
 	results = append(results, checkTenancy())
 	results = append(results, checkIdentityKeys())
 	results = append(results, checkDelegationAuthority())
+	results = append(results, checkMsgraphConnector(opts))
 	results = append(results, checkDatabase(opts))
 	results = append(results, checkSpiceDB(opts))
 	results = append(results, checkQdrant(opts))
@@ -135,6 +136,130 @@ func runChecks(opts doctorOptions) []checkResult {
 	results = append(results, checkWebhook())
 	results = append(results, checkShadowMode())
 	return results
+}
+
+// checkMsgraphConnector validates the Microsoft Graph ACL connector's
+// production posture (Milestone 3): credentials must be keyring:// or
+// secret-manager references (never plaintext env values in production),
+// and the connector scope/drive must be configured. Registry health
+// (last success, lag) is checked when DATABASE_URL is set.
+//
+// In production (GROUNDWORK_ENV=production), additionally validates:
+//   - DATABASE_URL is set (for DB-backed keyring)
+//   - GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 is set (for envelope encryption)
+//   - TENANT_ID is set (for tenant-scoped connector secret namespace)
+//   - MS_GRAPH_CLIENT_SECRET_REF matches keyring://connector/<id>
+//   - The keyring reference resolves to a secret in the tenant-scoped namespace
+func checkMsgraphConnector(opts doctorOptions) checkResult {
+	enabled := os.Getenv("ACL_CONNECTOR_TYPE") == "msgraph" || os.Getenv("MS_GRAPH_CONNECTOR_ENABLED") == "true"
+	if !enabled {
+		return checkResult{Name: "msgraph", Status: "SKIP", Detail: "Microsoft Graph connector not selected (ACL_CONNECTOR_TYPE != msgraph)"}
+	}
+	production := strings.EqualFold(os.Getenv("GROUNDWORK_ENV"), "production")
+	secret := os.Getenv("MS_GRAPH_CLIENT_SECRET")
+	secretRef := os.Getenv("MS_GRAPH_CLIENT_SECRET_REF")
+	if production && secret != "" {
+		return checkResult{Name: "msgraph", Status: "FAIL", Detail: "MS_GRAPH_CLIENT_SECRET is set as plaintext env; production requires MS_GRAPH_CLIENT_SECRET_REF=keyring://… or a secret-manager ref"}
+	}
+	if !production && secret == "" && secretRef == "" {
+		return checkResult{Name: "msgraph", Status: "WARN", Detail: "no client secret configured (MS_GRAPH_CLIENT_SECRET / MS_GRAPH_CLIENT_SECRET_REF)"}
+	}
+	if secretRef != "" && !isSecretRef(secretRef) {
+		return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("MS_GRAPH_CLIENT_SECRET_REF %q is not a keyring:// or secret-manager reference", secretRef)}
+	}
+	// In production, enforce strict requirements and validate the
+	// tenant-scoped keyring resolution.
+	var dbOpts *keyring.DBKeyProviderOptions
+	if production {
+		if opts.database == "" {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: "production requires DATABASE_URL for DB-backed keyring"}
+		}
+		if os.Getenv("GROUNDWORK_KEK_REF") == "" && os.Getenv("GROUNDWORK_KEK_BASE64") == "" {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: "production requires GROUNDWORK_KEK_REF or GROUNDWORK_KEK_BASE64 for key encryption"}
+		}
+		if os.Getenv("MS_GRAPH_TENANT_ID") == "" {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: "production requires MS_GRAPH_TENANT_ID for tenant-scoped connector secrets"}
+		}
+		dbOpts = keyring.BuildDBKeyProviderOptions()
+		if dbOpts == nil {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: "failed to build DB keyring options in production"}
+		}
+		dbOpts.TenantID = os.Getenv("MS_GRAPH_TENANT_ID")
+		defer keyring.CloseDB(dbOpts.DB)
+	}
+	// Resolve the reference NOW through the keyring resolver — the same
+	// gate acl-sync enforces at startup. The outcome and the credential
+	// expiry are reported; the secret itself is never printed.
+	credentialDetail := ""
+	if secretRef != "" {
+		resolver, expiry, err := keyring.GuardConnectorSecret(context.Background(), production, secret, secretRef, dbOpts)
+		if err != nil {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("MS_GRAPH_CLIENT_SECRET_REF does not resolve: %v", err)}
+		}
+		credentialDetail = "credentials via keyring reference"
+		if resolver == nil {
+			credentialDetail = "credentials via env reference (local/dev only)"
+		}
+		if !expiry.IsZero() {
+			credentialDetail += "; credential expiry " + expiry.UTC().Format(time.RFC3339)
+		}
+	}
+	required := []struct{ name, value string }{
+		{"MS_GRAPH_TENANT_ID", os.Getenv("MS_GRAPH_TENANT_ID")},
+		{"MS_GRAPH_CLIENT_ID", os.Getenv("MS_GRAPH_CLIENT_ID")},
+		{"MS_GRAPH_DRIVE_ID", os.Getenv("MS_GRAPH_DRIVE_ID")},
+	}
+	for _, r := range required {
+		if r.value == "" {
+			return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("%s is required when the msgraph connector is selected", r.name)}
+		}
+	}
+	detail := "scope + drive configured"
+	if credentialDetail != "" {
+		detail += "; " + credentialDetail
+	}
+	if opts.database == "" {
+		return checkResult{Name: "msgraph", Status: "PASS", Detail: detail + " (DATABASE_URL unset: installation registry not checked)"}
+	}
+	db, err := sql.Open("pgx", opts.database)
+	if err != nil {
+		return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("invalid DATABASE_URL: %v", err)}
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	defer cancel()
+	var lastSuccess sql.NullTime
+	var status string
+	err = db.QueryRowContext(ctx,
+		`SELECT status, last_success_at FROM connector_installations WHERE tenant_id = $1 AND provider = 'msgraph'`,
+		os.Getenv("MS_GRAPH_TENANT_ID"),
+	).Scan(&status, &lastSuccess)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return checkResult{Name: "msgraph", Status: "WARN", Detail: detail + "; no installation record yet (run acl-sync once)"}
+		}
+		return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("registry probe: %v", err)}
+	}
+	if status == "failed" || status == "disabled" {
+		return checkResult{Name: "msgraph", Status: "FAIL", Detail: fmt.Sprintf("installation status is %q", status)}
+	}
+	age := "never succeeded"
+	if lastSuccess.Valid {
+		age = time.Since(lastSuccess.Time).Truncate(time.Second).String() + " ago"
+	}
+	return checkResult{Name: "msgraph", Status: "PASS", Detail: fmt.Sprintf("%s; installation %q, last success %s", detail, status, age)}
+}
+
+// isSecretRef reports whether ref is a keyring:// or approved
+// secret-manager reference (mirrors aclsync.IsKeyringRef without the
+// import cycle surface).
+func isSecretRef(ref string) bool {
+	r := strings.TrimSpace(ref)
+	return strings.HasPrefix(r, "keyring://") ||
+		strings.HasPrefix(r, "secretsmanager://") ||
+		strings.HasPrefix(r, "aws:secretsmanager:") ||
+		strings.HasPrefix(r, "gcp:secretmanager:") ||
+		strings.HasPrefix(r, "vault://")
 }
 
 func checkDeployment(opts doctorOptions) checkResult {
@@ -276,16 +401,9 @@ func checkSpiceDB(opts doctorOptions) checkResult {
 	if opts.spicedb == "" {
 		return checkResult{Name: "spicedb", Status: "SKIP", Detail: "SPICEDB_ENDPOINT not set (no live relationship checks)"}
 	}
-	var sdbOpts []spicedb.Option
-	if os.Getenv("SPICEDB_INSECURE_PLAINTEXT") == "true" {
-		sdbOpts = append(sdbOpts, spicedb.WithInsecurePlaintext())
-	}
-	if caFile := os.Getenv("SPICEDB_CA_FILE"); caFile != "" {
-		caPEM, err := os.ReadFile(caFile)
-		if err != nil {
-			return checkResult{Name: "spicedb", Status: "FAIL", Detail: fmt.Sprintf("read CA file: %v", err)}
-		}
-		sdbOpts = append(sdbOpts, spicedb.WithCA(caPEM))
+	sdbOpts, tlsErr := spicedb.EnvOptions()
+	if tlsErr != nil {
+		return checkResult{Name: "spicedb", Status: "FAIL", Detail: fmt.Sprintf("transport: %v", tlsErr)}
 	}
 	sdbOpts = append(sdbOpts, spicedb.WithTimeout(opts.timeout))
 	client, err := spicedb.New(opts.spicedb, os.Getenv("SPICEDB_TOKEN"), sdbOpts...)

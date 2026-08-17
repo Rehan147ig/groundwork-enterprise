@@ -31,7 +31,7 @@ services:
       QDRANT_CIRCUIT_FAILURE_LIMIT: "3"
       QDRANT_CIRCUIT_OPEN_TIMEOUT_MS: "10000"
       QDRANT_CIRCUIT_HALF_OPEN_LIMIT: "1"
-      SPICEDB_ENDPOINT: http://spicedb:50051
+      SPICEDB_ENDPOINT: dns:///spicedb:50051
       SPICEDB_TOKEN: groundwork-local
       SPICEDB_INSECURE_PLAINTEXT: "true"
       DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
@@ -48,6 +48,10 @@ services:
       # GROUNDWORK_JWT_RS_PUBLIC_KEY[_FILE]) so /mcp requires a verified identity token.
       ALLOW_DEMO_IDENTITY: "true"
       # GROUNDWORK_JWT_HS_SECRET: "replace-with-a-strong-secret"
+      # Local/dev delegation key (Phase 2 governed agent execution): the
+      # runtime fatals at startup without one. Fixed dev secret here;
+      # production: GROUNDWORK_DELEGATION_RS_PRIVATE_KEY(_FILE).
+      GROUNDWORK_DELEGATION_HS_SECRET: local-dev-delegation-secret-37840edc-a1b2c3d4e5f6a7b8c9
     ports:
       # Exposes REST (/v1/query, /health, /metrics) AND Cloud MCP (POST /mcp).
       - "8080:8080"
@@ -76,7 +80,7 @@ services:
       EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
       EMBEDDING_CACHE_DIR: /models/fastembed
       BOOTSTRAP_STORAGE: "true"
-      SPICEDB_ENDPOINT: http://spicedb:50051
+      SPICEDB_ENDPOINT: dns:///spicedb:50051
       SPICEDB_TOKEN: groundwork-local
       SPICEDB_INSECURE_PLAINTEXT: "true"
     ports:
@@ -137,8 +141,13 @@ services:
       - qdrant-data:/qdrant/storage
 
   spicedb:
-    image: authzed/spicedb:latest
-    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-no-tls", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
+    # Pinned: newer/older tags have no gRPC TLS flags support guarantees.
+    # Modern SpiceDB serves TLS only when cert/key are provided (the old
+    # --grpc-no-tls / --grpc-ca flags no longer exist); local dev runs
+    # plaintext on the container network, matched by query-runtime's
+    # SPICEDB_INSECURE_PLAINTEXT.
+    image: authzed/spicedb:v1.56.0
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
     environment:
       SPICEDB_DATASTORE_ENGINE: memory
     ports:
