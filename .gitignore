@@ -27,6 +27,9 @@ build/
 *.pem
 *.key
 
+# Generated PKI — recreate with infra/certs/generate_certs.sh
+infra/certs/
+
 # Go binaries & build artifacts
 *.exe
 *.out
@@ -44,6 +47,8 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
+.coverage
 
 # TypeScript / JavaScript
 *.log
@@ -60,6 +65,12 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Local scratch / tooling artifacts
+tmp/
+session-summary.md
+console.log('HEALTHZ_ERR'
+services/query-runtime/NUL)*
 
 # Test / coverage artifacts
 htmlcov/
