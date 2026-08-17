@@ -76,19 +76,19 @@ class SpiceDBAuthorizer:
         updates = []
         for t in tuples:
             subject: dict[str, Any] = {
-                "object": {"object_type": t["subject_type"], "object_id": scope_id(tenant_id, t["subject_id"])}
+                "object": {"objectType": t["subject_type"], "objectId": scope_id(tenant_id, t["subject_id"])}
             }
             if t.get("subject_relation"):
-                subject["optional_relation"] = t["subject_relation"]
+                subject["optionalRelation"] = t["subject_relation"]
             updates.append(
                 {
                     "operation": "OPERATION_CREATE",
                     "relationship": {
                         "resource": {
-                            "object_type": t["object_type"],
-                            "object_id": scope_id(tenant_id, t["object_id"]),
-                            "relation": t["relation"],
+                            "objectType": t["object_type"],
+                            "objectId": scope_id(tenant_id, t["object_id"]),
                         },
+                        "relation": t["relation"],
                         "subject": subject,
                     },
                 }
@@ -108,7 +108,8 @@ class SpiceDBAuthorizer:
                 code == 409
                 or "already exists" in text
                 or "already" in text
-                or "object definition not found" in text
+                or ('"code":9' in text)
+                or ("object definition" in text and "not found" in text)
                 or "unknown relation" in text
             )
             if tolerated:

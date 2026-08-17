@@ -12,6 +12,8 @@ import (
 
 	"groundwork/query-runtime/internal/relationship"
 	"groundwork/query-runtime/internal/relationship/spicedb"
+
+	"github.com/google/uuid"
 )
 
 // spicedbWriter adapts the SpiceDB client to relWriter.
@@ -50,10 +52,12 @@ func (w *spicedbWriter) Write(ctx context.Context, tenantID string, rels []relat
 func (w *spicedbWriter) Close() error { return w.client.Close() }
 
 // seed is the -mode=seed entrypoint: idempotently populate Qdrant with
-// docs-dim vector chunks for the tenant/region, then grant each of the
-// users a view of exactly one document in the relationship backend
-// (SpiceDB) so the load run exercises a realistic
-// authorized/unauthorized mix.
+// docs-dim vector chunks for the tenant/region, then grant the load-test
+// users read access in the relationship backend (SpiceDB) through a
+// readers group: the group holds viewer on every seeded document and
+// each user is a group member. The load run's retrieval top-k for the
+// fixed question therefore always contains chunks the user may see, and
+// the delegation/dispatch subject resolves through the same group.
 func seed(c config) error {
 	httpc := &http.Client{Timeout: 10 * time.Second}
 	j := &jsonClient{httpc: httpc}
@@ -63,18 +67,25 @@ func seed(c config) error {
 	if err := seedPoints(j, c.qdrant, c.collection, c.docs, c.dim, c.tenant, c.region); err != nil {
 		return err
 	}
-	rels := make([]relationship.Relationship, 0, c.users)
+	rels := make([]relationship.Relationship, 0, c.docs+c.users)
+	for i := 0; i < c.docs; i++ {
+		rels = append(rels, relationship.Relationship{
+			Resource: relationship.DocumentRef(docID(i)),
+			Relation: relationship.RelationViewer,
+			Subject:  relationship.GroupRef("loadtest-readers"),
+		})
+	}
 	for i := 0; i < c.users; i++ {
 		rels = append(rels, relationship.Relationship{
-			Resource: relationship.DocumentRef(authorizedDoc(i, c.docs)),
-			Relation: relationship.RelationViewer,
+			Resource: relationship.ResourceRef{Type: relationship.TypeGroup, ID: "loadtest-readers"},
+			Relation: relationship.RelationMember,
 			Subject:  relationship.UserRef(userID(i)),
 		})
 	}
 	if err := c.relw.Write(context.Background(), c.tenant, rels); err != nil {
 		return fmt.Errorf("write grant relationships: %w", err)
 	}
-	log.Printf("seeded: %d docs (%d-dim), %d users granted in tenant %q", c.docs, c.dim, c.users, c.tenant)
+	log.Printf("seeded: %d docs (%d-dim), %d users granted via readers group in tenant %q", c.docs, c.dim, c.users, c.tenant)
 	return nil
 }
 
@@ -111,7 +122,7 @@ func seedPoints(j *jsonClient, base, collection string, docs, dim int, tenant, r
 		nChunks := 3
 		for ch := 0; ch < nChunks; ch++ {
 			points = append(points, map[string]any{
-				"id":     fmt.Sprintf("%s/%d", docID(i), ch),
+				"id":     uuid.NewSHA1(uuid.NameSpaceURL, []byte(fmt.Sprintf("%s/%d", docID(i), ch))).String(),
 				"vector": deterministicVector(fmt.Sprintf("doc-%d/chunk-%d", i, ch), dim),
 				"payload": map[string]any{
 					"document_id": docID(i),
@@ -191,17 +202,19 @@ func ensureAgentVersion(j *jsonClient, c config, assertion string) (agentID, ver
 		}
 	}
 	if agentID == "" {
-		status, err := j.do(http.MethodPost, c.runtime+"/v1/agents", map[string]any{
-			"name": c.agent, "risk_tier": "low", "environment": "production",
-			"business_purpose": "load testing",
-		}, &struct {
+		var created struct {
 			Agent struct {
 				ID string `json:"id"`
 			} `json:"agent"`
-		}{}, assertion, "lt-setup-agent-"+c.agent)
+		}
+		status, err := j.do(http.MethodPost, c.runtime+"/v1/agents", map[string]any{
+			"name": c.agent, "risk_tier": "low", "environment": "production",
+			"business_purpose": "load testing",
+		}, &created, assertion, "lt-setup-agent-"+c.agent)
 		if err != nil || status >= 300 {
 			return "", "", fmt.Errorf("create agent %s: %w", c.agent, err)
 		}
+		agentID = created.Agent.ID
 	}
 	if versionID, err = activeVersion(j, c, agentID); err != nil {
 		return "", "", err
@@ -261,24 +274,25 @@ func activeVersion(j *jsonClient, c config, agentID string) (string, error) {
 // ensureTool creates (or finds) the governed builtin tool and brings it
 // to the active lifecycle.
 func ensureTool(j *jsonClient, c config, name, assertion string) (string, error) {
-	find := func() (string, error) {
+	find := func() (string, string, error) {
 		var list struct {
 			Tools []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Lifecycle string `json:"lifecycle"`
 			} `json:"tools"`
 		}
 		if _, err := j.do(http.MethodGet, c.runtime+"/v1/governance/tools", nil, &list, "", ""); err != nil {
-			return "", fmt.Errorf("list tools: %w", err)
+			return "", "", fmt.Errorf("list tools: %w", err)
 		}
 		for _, t := range list.Tools {
 			if t.Name == name {
-				return t.ID, nil
+				return t.ID, t.Lifecycle, nil
 			}
 		}
-		return "", nil
+		return "", "", nil
 	}
-	toolID, err := find()
+	toolID, toolLifecycle, err := find()
 	if err != nil {
 		return "", err
 	}
@@ -295,17 +309,20 @@ func ensureTool(j *jsonClient, c config, name, assertion string) (string, error)
 		if err != nil && status != http.StatusConflict {
 			return "", fmt.Errorf("create tool %s: %w", name, err)
 		}
-		if toolID, err = find(); err != nil {
+		toolID, toolLifecycle, err = find()
+		if err != nil {
 			return "", err
 		}
 		if toolID == "" {
 			return "", fmt.Errorf("tool %s not found after create", name)
 		}
 	}
-	// Bring to active (tolerate invalid transition when already active).
-	if _, err := j.do(http.MethodPost, c.runtime+"/v1/governance/tools/"+toolID+"/lifecycle",
-		map[string]any{"lifecycle": "active"}, nil, assertion, "lt-setup-lifecycle-"+name); err != nil {
-		return "", fmt.Errorf("activate tool %s: %w", name, err)
+	// Bring to active (skip when the tool is already active).
+	if toolLifecycle != "active" {
+		if _, err := j.do(http.MethodPost, c.runtime+"/v1/governance/tools/"+toolID+"/lifecycle",
+			map[string]any{"lifecycle": "active"}, nil, assertion, "lt-setup-lifecycle-"+name); err != nil {
+			return "", fmt.Errorf("activate tool %s: %w", name, err)
+		}
 	}
 	return toolID, nil
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,9 +300,17 @@ func (p *PostgresAPIKeyResolver) bootstrap(ctx context.Context, bootstrapKey str
 	if len(tenant.Scopes) == 0 {
 		tenant.Scopes = []string{"query", "admin"}
 	}
+	// The bootstrap key's per-minute budget is env-tunable so local load
+	// runs can lift the default ceiling without touching the key row.
+	rpm := 600
+	if v := os.Getenv("BOOTSTRAP_API_KEY_RATE_LIMIT_RPM"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			rpm = parsed
+		}
+	}
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO api_keys (key_hash, key_prefix, tenant_id, region, name, scopes, rate_limit_rpm, active)
-		VALUES ($1, NULL, $2, $3, $4, $5, 600, TRUE)
+		VALUES ($1, NULL, $2, $3, $4, $5, $6, TRUE)
 		ON CONFLICT (key_hash) DO UPDATE
 		SET tenant_id = EXCLUDED.tenant_id,
 			region = EXCLUDED.region,
@@ -310,7 +319,7 @@ func (p *PostgresAPIKeyResolver) bootstrap(ctx context.Context, bootstrapKey str
 			rate_limit_rpm = EXCLUDED.rate_limit_rpm,
 			active = TRUE,
 			revoked_at = NULL
-	`, hashAPIKey(bootstrapKey), tenant.TenantID, tenant.Region, tenant.KeyName, strings.Join(tenant.Scopes, ","))
+	`, hashAPIKey(bootstrapKey), tenant.TenantID, tenant.Region, tenant.KeyName, strings.Join(tenant.Scopes, ","), rpm)
 	return err
 }
 

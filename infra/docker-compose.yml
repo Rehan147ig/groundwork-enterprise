@@ -25,6 +25,9 @@ services:
       EMBEDDING_URL: http://ingestion:8000
       QUERY_TIMEOUT_MS: "15000"
       ACL_TIMEOUT_MS: "500"
+      GROUNDWORK_AUDIT_POOL_MAX: "100"
+      BOOTSTRAP_API_KEY_RATE_LIMIT_RPM: "200000"
+      RELATIONSHIP_TIMEOUT_MS: "2000"
       BACKEND_HTTP_TIMEOUT_MS: "15000"
       EMBEDDING_TIMEOUT_MS: "15000"
       QDRANT_TIMEOUT_MS: "15000"
@@ -47,7 +50,7 @@ services:
       # PRODUCTION: remove ALLOW_DEMO_IDENTITY and set GROUNDWORK_JWT_HS_SECRET (or
       # GROUNDWORK_JWT_RS_PUBLIC_KEY[_FILE]) so /mcp requires a verified identity token.
       ALLOW_DEMO_IDENTITY: "true"
-      # GROUNDWORK_JWT_HS_SECRET: "replace-with-a-strong-secret"
+      GROUNDWORK_JWT_HS_SECRET: local-dev-jwt-secret-9f3e2c1b0a4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f
       # Local/dev delegation key (Phase 2 governed agent execution): the
       # runtime fatals at startup without one. Fixed dev secret here;
       # production: GROUNDWORK_DELEGATION_RS_PRIVATE_KEY(_FILE).
@@ -80,7 +83,7 @@ services:
       EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
       EMBEDDING_CACHE_DIR: /models/fastembed
       BOOTSTRAP_STORAGE: "true"
-      SPICEDB_ENDPOINT: dns:///spicedb:50051
+      SPICEDB_ENDPOINT: http://spicedb:8443
       SPICEDB_TOKEN: groundwork-local
       SPICEDB_INSECURE_PLAINTEXT: "true"
     ports:
@@ -147,7 +150,7 @@ services:
     # plaintext on the container network, matched by query-runtime's
     # SPICEDB_INSECURE_PLAINTEXT.
     image: authzed/spicedb:v1.56.0
-    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
+    command: ["serve", "--grpc-addr", "0.0.0.0:50051", "--http-addr", "0.0.0.0:8443", "--http-enabled", "--grpc-preshared-key", "groundwork-local", "--log-format", "json"]
     environment:
       SPICEDB_DATASTORE_ENGINE: memory
     ports:

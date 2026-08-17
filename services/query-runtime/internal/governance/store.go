@@ -792,7 +792,14 @@ func (p *PostgresStore) Transact(ctx context.Context, lockKey string, fn func(tx
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+	// Serialize mutations per entity (the state read, the conditional
+	// updates, and the chain append are one atomic step), keyed by a
+	// short UTC time bucket so concurrent writers for the same entity
+	// proceed in parallel instead of stacking on a single global lock
+	// (same striping pattern as the query audit writer). One-time
+	// operations stay safe: grant/run consumes are guarded single
+	// UPDATEs keyed on RowsAffected, and idempotency keys are unique.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || floor(extract(epoch from now()))))`, lockKey); err != nil {
 		return err
 	}
 	ptx := &postgresTx{pgReader: pgReader{q: tx}, tx: tx}
@@ -1136,7 +1143,7 @@ func (p *postgresTx) CreateRun(ctx context.Context, r runtime.AgentRun) (runtime
 		RETURNING `+runColumns,
 		r.TenantID, r.AgentID, r.DelegationGrantID, nullString(r.IdempotencyKey), r.UserID, r.Purpose, r.Region, r.Status,
 		r.DelegationDepth, r.ChainVerified, nullString(r.RootGrantID), nullString(r.ParentGrantID),
-		nullString(r.ExternalAgentID), nullString(r.OrganizationID), nullString(r.CustomerPrincipalID), nullString(r.ConsentID))
+		notNullString(r.ExternalAgentID), notNullString(r.OrganizationID), notNullString(r.CustomerPrincipalID), notNullString(r.ConsentID))
 	created, err := scanRun(row)
 	if err != nil && isUniqueViolation(err) {
 		return runtime.AgentRun{}, runtime.ErrIdempotencyConflict

@@ -971,6 +971,17 @@ func (b supportBundleSource) Sections(ctx context.Context, tenantID string) ([]r
 	return sections, nil
 }
 
+// statusRecorder captures the response status code for the trace log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
 // telemetryMiddleware extracts the W3C traceparent header (if present),
 // stamps the trace context on the request, and logs trace id + duration
 // per request. Dependency-free: no OTel SDK — trace context only.
@@ -983,8 +994,9 @@ func telemetryMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		start := time.Now()
-		next.ServeHTTP(w, r.WithContext(telemetry.WithTraceContext(r.Context(), tc)))
-		log.Printf("trace %s %s %s (%s)", tc, r.Method, r.URL.Path, time.Since(start))
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r.WithContext(telemetry.WithTraceContext(r.Context(), tc)))
+		log.Printf("trace %s %s %s status=%d (%s)", tc, r.Method, r.URL.Path, rec.status, time.Since(start))
 	})
 }
 

@@ -16,6 +16,12 @@ import (
 
 type outcome int
 
+// runSalt makes every governed idempotency key unique per loadtest
+// process: the governance store persists replay records, so re-running
+// the benchmark with the same keys would return TokenAlreadyIssued with
+// an empty token (fail at run creation) instead of minting fresh grants.
+var runSalt = fmt.Sprintf("%x", time.Now().UnixNano())
+
 const (
 	outcomeAllowed outcome = iota
 	outcomeDenied
@@ -107,10 +113,10 @@ func loadTest(c config) error {
 	for w := 0; w < workers; w++ {
 		name := enabled[w%len(enabled)]
 		wg.Add(1)
-		go func(name string) {
+		go func(w int, name string) {
 			defer wg.Done()
-			runPathLoop(ctx, c, httpc, name, agentID, connectorName, stats[name])
-		}(name)
+			runPathLoop(ctx, c, httpc, w, name, agentID, connectorName, stats[name])
+		}(w, name)
 	}
 	<-stopAt
 	cancel()
@@ -138,7 +144,7 @@ func parsePaths(s string) (map[string]bool, error) {
 	return out, nil
 }
 
-func runPathLoop(ctx context.Context, c config, httpc *http.Client, name, agentID, connectorName string, s *pathStats) {
+func runPathLoop(ctx context.Context, c config, httpc *http.Client, worker int, name, agentID, connectorName string, s *pathStats) {
 	var iter int64
 	for ctx.Err() == nil {
 		var oc outcome
@@ -147,11 +153,11 @@ func runPathLoop(ctx context.Context, c config, httpc *http.Client, name, agentI
 		case "query":
 			oc, d = runQuery(httpc, c)
 		case "delegation":
-			oc, d = runDelegation(httpc, c, agentID, iter)
+			oc, d = runDelegation(httpc, c, agentID, int64(worker), iter)
 		case "dispatch":
-			oc, d = runDispatch(httpc, c, agentID, c.tool, "search", iter)
+			oc, d = runDispatch(httpc, c, agentID, c.tool, "search", int64(worker), iter)
 		case "connector":
-			oc, d = runDispatch(httpc, c, agentID, connectorName, "call", iter)
+			oc, d = runDispatch(httpc, c, agentID, connectorName, "call", int64(worker), iter)
 		case "evidence":
 			oc, d = runEvidence(httpc, c)
 		}
@@ -202,7 +208,7 @@ func postQuery(httpc *http.Client, c config, token string) (int, int, error) {
 // subject, open a run, then evaluate one action. The final evaluate
 // outcome classifies the path; the measured latency is the whole
 // pipeline.
-func runDelegation(httpc *http.Client, c config, agentID string, iter int64) (outcome, time.Duration) {
+func runDelegation(httpc *http.Client, c config, agentID string, worker, iter int64) (outcome, time.Duration) {
 	j := &jsonClient{httpc: httpc, key: c.apiKey}
 	assertion := mintJWT(c.jwtSecret, c.owner)
 	start := time.Now()
@@ -214,7 +220,7 @@ func runDelegation(httpc *http.Client, c config, agentID string, iter int64) (ou
 	status, err := j.do(http.MethodPost, c.runtime+"/v1/governance/delegations", map[string]any{
 		"agent_id": agentID, "subject_principal_id": c.subject, "purpose": "load-testing",
 		"permitted_actions": []string{c.tool + ":search"},
-	}, &mintResp, assertion, fmt.Sprintf("lt-mint-%d", iter))
+	}, &mintResp, assertion, fmt.Sprintf("lt-mint-%s-%d-%d", runSalt, worker, iter))
 	if err != nil || status >= 400 {
 		return early(status, err, lat())
 	}
@@ -226,7 +232,7 @@ func runDelegation(httpc *http.Client, c config, agentID string, iter int64) (ou
 	status, err = j.do(http.MethodPost, c.runtime+"/v1/governance/runs", map[string]any{
 		"delegation_token": mintResp.Token,
 		"actions":          []map[string]any{{"tool_name": c.tool, "action": "search", "resource_ref": "*"}},
-	}, &runResp, assertion, fmt.Sprintf("lt-run-%d", iter))
+	}, &runResp, assertion, fmt.Sprintf("lt-run-%s-%d-%d", runSalt, worker, iter))
 	if err != nil || status >= 400 {
 		return early(status, err, lat())
 	}
@@ -235,7 +241,7 @@ func runDelegation(httpc *http.Client, c config, agentID string, iter int64) (ou
 	}
 	status, err = j.do(http.MethodPost, c.runtime+"/v1/governance/runs/"+runResp.Run.ID+"/evaluate", map[string]any{
 		"delegation_token": mintResp.Token, "tool_name": c.tool, "action": "search", "resource_ref": "*",
-	}, &evalResp, assertion, fmt.Sprintf("lt-eval-%d", iter))
+	}, &evalResp, assertion, fmt.Sprintf("lt-eval-%s-%d-%d", runSalt, worker, iter))
 	if err != nil {
 		return outcomeError, lat()
 	}
@@ -256,7 +262,7 @@ func runDelegation(httpc *http.Client, c config, agentID string, iter int64) (ou
 // (builtin) or the load-created connector (through the gateway). A
 // dispatch_mode of "dispatched" is "allowed"; a denied dispatch is the
 // fail-closed result.
-func runDispatch(httpc *http.Client, c config, agentID, toolName, action string, iter int64) (outcome, time.Duration) {
+func runDispatch(httpc *http.Client, c config, agentID, toolName, action string, worker, iter int64) (outcome, time.Duration) {
 	j := &jsonClient{httpc: httpc, key: c.apiKey}
 	assertion := mintJWT(c.jwtSecret, c.owner)
 	start := time.Now()
@@ -268,7 +274,7 @@ func runDispatch(httpc *http.Client, c config, agentID, toolName, action string,
 	status, err := j.do(http.MethodPost, c.runtime+"/v1/governance/delegations", map[string]any{
 		"agent_id": agentID, "subject_principal_id": c.subject, "purpose": "load-testing",
 		"permitted_actions": []string{toolName + ":" + action},
-	}, &mintResp, assertion, fmt.Sprintf("lt-mint-%d-%s", iter, toolName))
+	}, &mintResp, assertion, fmt.Sprintf("lt-mint-%s-%d-%d-%s", runSalt, worker, iter, toolName))
 	if err != nil || status >= 400 {
 		return early(status, err, lat())
 	}
@@ -280,7 +286,7 @@ func runDispatch(httpc *http.Client, c config, agentID, toolName, action string,
 	status, err = j.do(http.MethodPost, c.runtime+"/v1/governance/runs", map[string]any{
 		"delegation_token": mintResp.Token,
 		"actions":          []map[string]any{{"tool_name": toolName, "action": action, "resource_ref": "*"}},
-	}, &runResp, assertion, fmt.Sprintf("lt-run-%d-%s", iter, toolName))
+	}, &runResp, assertion, fmt.Sprintf("lt-run-%s-%d-%d-%s", runSalt, worker, iter, toolName))
 	if err != nil || status >= 400 {
 		return early(status, err, lat())
 	}
@@ -288,9 +294,9 @@ func runDispatch(httpc *http.Client, c config, agentID, toolName, action string,
 		Allowed      bool   `json:"allowed"`
 		DispatchMode string `json:"dispatch_mode"`
 	}
-	status, err = j.do(http.MethodPost, c.runtime+"/v1/governance/runs/"+runResp.Run.ID+"/dispatch", map[string]any{
-		"delegation_token": mintResp.Token, "tool_name": toolName, "action": action, "resource_ref": "*",
-	}, &dispatchResp, assertion, fmt.Sprintf("lt-dispatch-%d-%s", iter, toolName))
+	status, err = j.do(http.MethodPost, c.runtime+"/v1/governance/dispatch", map[string]any{
+		"delegation_token": mintResp.Token, "run_id": runResp.Run.ID, "tool_name": toolName, "action": action, "resource_ref": "*",
+	}, &dispatchResp, assertion, fmt.Sprintf("lt-dispatch-%s-%d-%d-%s", runSalt, worker, iter, toolName))
 	if err != nil {
 		return outcomeError, lat()
 	}
@@ -386,9 +392,29 @@ func setupLoadConnector(httpc *http.Client, c config, agentID, versionID, stubUR
 		} `json:"detail"`
 	}
 	status, err := j.do(http.MethodPost, c.runtime+"/v1/governance/connectors", map[string]any{
-		"name": name, "transport": "http",
-		"config":             map[string]any{"url": stubURL, "headers": map[string]string{}},
-		"owner_principal_id": c.owner, "region": c.region,
+		"name":        name,
+		"type":        "rest",
+		"description": "load test connector stub",
+		"config": map[string]any{
+			"base_url":              stubURL,
+			"region":                c.region,
+			"timeout_ms":            5000,
+			"retry_max":             1,
+			"max_response_bytes":    262144,
+			"allowed_content_types": []string{"application/json"},
+			"redaction_fields":      []string{},
+		},
+		"actions": []map[string]any{{
+			"name":               "call",
+			"transport_method":   "POST",
+			"path_template":      "/",
+			"risk":               "high",
+			"read_only":          false,
+			"requires_approval":  false,
+			"max_request_bytes":  65536,
+			"max_response_bytes": 262144,
+		}},
+		"owner_principal_id": c.owner,
 	}, &reg, assertion, "lt-conn-"+name)
 	if err != nil || status >= 400 {
 		return "", fmt.Errorf("register connector: %w", err)
@@ -401,7 +427,10 @@ func setupLoadConnector(httpc *http.Client, c config, agentID, versionID, stubUR
 		map[string]any{"reason": "load testing"}, nil, assertion, "lt-conn-act-"+name); err != nil && status != http.StatusConflict {
 		return "", fmt.Errorf("activate connector: %w", err)
 	}
-	toolID, err := connectorToolID(j, c.runtime, name, assertion)
+	// A connector-backed tool is a governed tool (transport http/mcp)
+	// whose NAME matches the registered connector — the gateway resolves
+	// the connector by the dispatched tool's name.
+	toolID, err := ensureHTTPTool(j, c, name, stubURL, assertion)
 	if err != nil {
 		return "", err
 	}
@@ -420,22 +449,65 @@ func setupLoadConnector(httpc *http.Client, c config, agentID, versionID, stubUR
 	return name, nil
 }
 
-func connectorToolID(j *jsonClient, runtime, name, assertion string) (string, error) {
-	var list struct {
-		Tools []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"tools"`
+// ensureHTTPTool creates (or finds) the connector-backed governed tool
+// with the connector's name and brings it to the active lifecycle.
+func ensureHTTPTool(j *jsonClient, c config, name, stubURL, assertion string) (string, error) {
+	find := func() (string, string, error) {
+		var list struct {
+			Tools []struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Lifecycle string `json:"lifecycle"`
+			} `json:"tools"`
+		}
+		if _, err := j.do(http.MethodGet, c.runtime+"/v1/governance/tools", nil, &list, assertion, ""); err != nil {
+			return "", "", fmt.Errorf("list tools: %w", err)
+		}
+		for _, t := range list.Tools {
+			if t.Name == name {
+				return t.ID, t.Lifecycle, nil
+			}
+		}
+		return "", "", nil
 	}
-	if _, err := j.do(http.MethodGet, runtime+"/v1/governance/tools", nil, &list, assertion, ""); err != nil {
-		return "", fmt.Errorf("list tools: %w", err)
+	toolID, toolLifecycle, err := find()
+	if err != nil {
+		return "", err
 	}
-	for _, t := range list.Tools {
-		if t.Name == name {
-			return t.ID, nil
+	if toolID == "" {
+		var created struct {
+			Tool struct {
+				ID string `json:"id"`
+			} `json:"tool"`
+		}
+		status, err := j.do(http.MethodPost, c.runtime+"/v1/governance/tools", map[string]any{
+			"name": name, "description": "load test connector-backed tool",
+			"transport": "http", "endpoint_or_server": stubURL,
+			"owner_principal_id": c.owner, "region": c.region,
+		}, &created, assertion, "lt-conn-tool-"+name)
+		if err != nil && status != http.StatusConflict {
+			return "", fmt.Errorf("create connector tool %s: %w", name, err)
+		}
+		toolID = created.Tool.ID
+		if toolID == "" {
+			var lc string
+			if toolID, lc, err = find(); err != nil {
+				return "", err
+			} else {
+				toolLifecycle = lc
+			}
+		}
+		if toolID == "" {
+			return "", fmt.Errorf("tool %s not found after create", name)
 		}
 	}
-	return "", fmt.Errorf("connector tool %q not found", name)
+	if toolLifecycle != "active" {
+		if _, err := j.do(http.MethodPost, c.runtime+"/v1/governance/tools/"+toolID+"/lifecycle",
+			map[string]any{"lifecycle": "active"}, nil, assertion, "lt-conn-tool-lifecycle-"+name); err != nil {
+			return "", fmt.Errorf("activate tool %s: %w", name, err)
+		}
+	}
+	return toolID, nil
 }
 
 // newConnectorStub is the internal connector target for the connector

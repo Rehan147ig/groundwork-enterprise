@@ -98,7 +98,8 @@ type Client struct {
 	tokenMu  sync.Mutex
 	zedToken string
 
-	bootstrapOnce sync.Once
+	bootstrapMu   sync.Mutex
+	bootstrapDone bool
 	bootstrapErr  error
 }
 
@@ -238,15 +239,18 @@ func (c *Client) Close() error { return c.conn.Close() }
 // failed call is retried on the next invocation (a transient failure at
 // startup must not poison readiness forever).
 func (c *Client) Bootstrap(ctx context.Context) error {
-	c.bootstrapOnce.Do(func() {
-		ctx, cancel := c.withTimeout(ctx)
-		defer cancel()
-		_, err := c.schema.WriteSchema(ctx, &v1.WriteSchemaRequest{Schema: schema.ZED()})
-		c.bootstrapErr = err
-		if err != nil {
-			c.bootstrapOnce = sync.Once{}
-		}
-	})
+	c.bootstrapMu.Lock()
+	defer c.bootstrapMu.Unlock()
+	if c.bootstrapDone {
+		return c.bootstrapErr
+	}
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	_, err := c.schema.WriteSchema(ctx, &v1.WriteSchemaRequest{Schema: schema.ZED()})
+	c.bootstrapErr = err
+	if err == nil {
+		c.bootstrapDone = true
+	}
 	return c.bootstrapErr
 }
 

@@ -169,32 +169,13 @@ func (p *PostgresAuditWriter) Write(ctx context.Context, entry AuditEntry) error
 	// atomic step. Without this lock two concurrent writers could read the same latest
 	// digest and fork the chain. The advisory lock auto-releases when the tx ends.
 	//
-	// PR #22 HA review — TODO future scale lever: this lock is the per-tenant
-	// write ceiling. For a tenant pushing past it, stripe the lock key by a
-	// time bucket (e.g. UTC minute):
-	//   pg_advisory_xact_lock(hashtext($1 || ':' || floor(extract(epoch from now())/60)))
-	// That preserves causal ordering WITHIN a bucket (concurrent writers in the
-	// same minute still serialize) but lets cross-bucket writers proceed in
-	// parallel. The chain then has minute-granularity strict order with
-	// intra-minute parallelism — fine for ledger semantics, ~60x throughput
-	// per tenant. One-line writer change, zero schema change.
-	//
-	// Not implemented today because:
-	//   - the current per-tenant ceiling (~thousands of writes/sec) is far
-	//     above any agent fleet's per-tenant volume;
-	//   - LoadAuditChain's ORDER BY seq (migration 030) tolerates intra-bucket
-	//     reordering; chain verification still works.
-	//
-	// Do NOT replace with an async outbox — that breaks the synchronous
-	// fail-closed contract (TestAuditWrite_FailsEngine).
-	//
-	// Ordering note (migration 030): the previous-hash lookup and
-	// LoadAuditChain order by the monotonic seq column, NOT
-	// (timestamp_utc, id) — id is a random UUID and timestamps have
-	// microsecond ties, so the old ordering could invert the relative
-	// order of two same-tenant writes made within one microsecond and
-	// VerifyChain would report a broken link on an innocent chain.
-	if _, err := tx.ExecContext(writeCtx, `SELECT pg_advisory_xact_lock(hashtext($1))`, entry.TenantID); err != nil {
+	// The lock key is striped by a short UTC time bucket (1s): concurrent writers in
+	// the same bucket still serialize, but writers in different buckets proceed in
+	// parallel, removing the per-tenant global write ceiling that starved the shared
+	// connection pool under load. LoadAuditChain orders by the monotonic seq column
+	// (migration 030), so intra-bucket reordering is tolerated and chain verification
+	// stays sound.
+	if _, err := tx.ExecContext(writeCtx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || floor(extract(epoch from now()))))`, entry.TenantID); err != nil {
 		return err
 	}
 

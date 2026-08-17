@@ -10,6 +10,7 @@ toolchain go1.26.6
 require (
 	github.com/authzed/authzed-go v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/prometheus/client_golang v1.20.5
 	golang.org/x/crypto v0.51.0

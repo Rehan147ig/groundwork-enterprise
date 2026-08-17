@@ -26,11 +26,15 @@ func DefaultTimeoutConfig() TimeoutConfig {
 
 func TimeoutConfigFromEnv() TimeoutConfig {
 	defaults := DefaultTimeoutConfig()
+	aclCheck := envDuration("RELATIONSHIP_TIMEOUT_MS", 0)
+	if aclCheck <= 0 {
+		aclCheck = envDuration("ACL_TIMEOUT_MS", defaults.ACLCheck)
+	}
 	return TimeoutConfig{
 		Total:        envDuration("BACKEND_HTTP_TIMEOUT_MS", defaults.Total),
 		Embedding:    envDuration("EMBEDDING_TIMEOUT_MS", defaults.Embedding),
 		QdrantSearch: envDuration("QDRANT_TIMEOUT_MS", defaults.QdrantSearch),
-		ACLCheck:     envDuration("RELATIONSHIP_TIMEOUT_MS", defaults.ACLCheck),
+		ACLCheck:     aclCheck,
 		AuditWrite:   envDuration("AUDIT_TIMEOUT_MS", defaults.AuditWrite),
 	}
 }

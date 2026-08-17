@@ -223,15 +223,15 @@ func (s *Server) connectorTransition(w http.ResponseWriter, r *http.Request, to 
 }
 
 func (s *Server) activateConnector(w http.ResponseWriter, r *http.Request) {
-	s.connectorTransition(w, r, ConnectorLifecycleActive)
+	s.connectorTransition(w, r, "activate")
 }
 
 func (s *Server) suspendConnector(w http.ResponseWriter, r *http.Request) {
-	s.connectorTransition(w, r, ConnectorLifecycleSuspended)
+	s.connectorTransition(w, r, "suspend")
 }
 
 func (s *Server) revokeConnector(w http.ResponseWriter, r *http.Request) {
-	s.connectorTransition(w, r, ConnectorLifecycleRevoked)
+	s.connectorTransition(w, r, "revoke")
 }
 
 func (s *Server) updateConnectorConfig(w http.ResponseWriter, r *http.Request) {

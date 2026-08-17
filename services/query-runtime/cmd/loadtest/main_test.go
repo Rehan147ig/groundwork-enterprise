@@ -203,7 +203,7 @@ func (f *fakeRuntime) mux() *http.ServeMux {
 			"decision": map[string]any{"decision": "allowed", "status": "passed", "gates": []map[string]any{}},
 		})
 	})
-	mux.HandleFunc("POST /v1/governance/runs/{id}/dispatch", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/governance/dispatch", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ToolName string `json:"tool_name"`
 		}
