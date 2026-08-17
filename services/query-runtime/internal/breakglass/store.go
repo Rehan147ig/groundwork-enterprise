@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"groundwork/query-runtime/internal/runtime"
 )
@@ -16,14 +17,25 @@ import (
 // evidence chain cannot fork.
 type TxStore interface {
 	Reader
-	// CreateGrant persists a new grant row (status active).
+	// CreateGrant persists a new grant row with its own status (active,
+	// or pending_approval for the four-eyes flow).
 	CreateGrant(ctx context.Context, g runtime.BreakGlassGrant) (runtime.BreakGlassGrant, error)
 	// AppendEvent persists immutable hash-chained evidence. The chain
 	// links per tenant (each event digests its predecessor).
 	AppendEvent(ctx context.Context, e runtime.BreakGlassEvent) (runtime.BreakGlassEvent, error)
 	// SetGrantStatus transitions a grant's lifecycle status and, for a
-	// revocation, records who revoked and why.
+	// revocation or rejection, records who terminated it and why.
 	SetGrantStatus(ctx context.Context, tenantID, grantID, status, revokedBy, revocationReason string) (runtime.BreakGlassGrant, error)
+	// ApproveStep records one four-eyes approval: step 1 records
+	// approver1 / approved_by_admin1_at (grant stays pending), step 2
+	// records approver2 / approved_by_admin2_at and flips the grant to
+	// active.
+	ApproveStep(ctx context.Context, tenantID, grantID, approver string, adminStep int, at time.Time) (runtime.BreakGlassGrant, error)
+	// BindGrantKey attaches the minted API key when a pending grant is
+	// activated (a pending grant never carries a live key, so the key is
+	// minted only at activation and bound here atomically with the
+	// active transition).
+	BindGrantKey(ctx context.Context, tenantID, grantID string, keyID int64, keyPrefix string) (runtime.BreakGlassGrant, error)
 }
 
 // Reader is the read surface (tenant-scoped only).
@@ -84,6 +96,16 @@ func (s *memoryStore) AppendEvent(ctx context.Context, e runtime.BreakGlassEvent
 	if e.ID == "" {
 		e.ID = fmt.Sprintf("evt-%d", s.memNext())
 	}
+	// Mirror the Postgres store: the digest is computed over the
+	// previous event in the tenant's chain, so the memory store's
+	// evidence verifies identically (VerifyBreakGlassEventChain).
+	var prev string
+	chain := s.events[e.TenantID]
+	if len(chain) > 0 {
+		prev = chain[len(chain)-1].ImmutableDigest
+	}
+	e.ImmutableDigest = ComputeBreakGlassEventDigest(e, prev)
+	e.PreviousHash = prev
 	s.events[e.TenantID] = append(s.events[e.TenantID], e)
 	return e, nil
 }
@@ -94,10 +116,44 @@ func (s *memoryStore) SetGrantStatus(ctx context.Context, tenantID, grantID, sta
 		return runtime.BreakGlassGrant{}, runtime.ErrBreakGlassNotFound
 	}
 	g.Status = status
-	if status == runtime.BreakGlassStatusRevoked {
+	if status == runtime.BreakGlassStatusRevoked || status == runtime.BreakGlassStatusRejected {
 		g.RevokedBy = revokedBy
 		g.RevocationReason = revocationReason
 	}
+	s.grants[memGrantKey(tenantID, grantID)] = g
+	return g, nil
+}
+
+func (s *memoryStore) ApproveStep(ctx context.Context, tenantID, grantID, approver string, adminStep int, at time.Time) (runtime.BreakGlassGrant, error) {
+	g, ok := s.grants[memGrantKey(tenantID, grantID)]
+	if !ok {
+		return runtime.BreakGlassGrant{}, runtime.ErrBreakGlassNotFound
+	}
+	switch adminStep {
+	case 1:
+		g.Approver1 = approver
+		g.ApprovedByAdmin1At = at
+	case 2:
+		g.Approver2 = approver
+		g.ApprovedByAdmin2At = at
+		g.Status = runtime.BreakGlassStatusActive
+	default:
+		return runtime.BreakGlassGrant{}, fmt.Errorf("invalid approval step %d", adminStep)
+	}
+	s.grants[memGrantKey(tenantID, grantID)] = g
+	return g, nil
+}
+
+func (s *memoryStore) BindGrantKey(ctx context.Context, tenantID, grantID string, keyID int64, keyPrefix string) (runtime.BreakGlassGrant, error) {
+	g, ok := s.grants[memGrantKey(tenantID, grantID)]
+	if !ok {
+		return runtime.BreakGlassGrant{}, runtime.ErrBreakGlassNotFound
+	}
+	if g.KeyID != 0 {
+		return runtime.BreakGlassGrant{}, fmt.Errorf("%w: grant already has a bound key", runtime.ErrBreakGlassNotPendingApproval)
+	}
+	g.KeyID = keyID
+	g.KeyPrefix = keyPrefix
 	s.grants[memGrantKey(tenantID, grantID)] = g
 	return g, nil
 }

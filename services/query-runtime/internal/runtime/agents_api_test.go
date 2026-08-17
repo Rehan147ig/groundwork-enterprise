@@ -23,6 +23,8 @@ import (
 
 // testVerifier implements runtime.IdentityVerifier for tests: HS256,
 // expiry required, "none" rejected — mirrors the production verifier.
+// A `roles` claim is honored exactly like the OIDC verifier: an "admin"
+// role value sets Identity.Admin, and the raw role list is preserved.
 type testVerifier struct{ secret string }
 
 func (v testVerifier) Verify(_ context.Context, token string) (runtime.Identity, error) {
@@ -35,7 +37,15 @@ func (v testVerifier) Verify(_ context.Context, token string) (runtime.Identity,
 	if err != nil || !tok.Valid {
 		return runtime.Identity{}, errors.New("invalid token")
 	}
-	return runtime.Identity{UserID: claimSub(tok.Claims), Subject: claimSub(tok.Claims), Verified: true}, nil
+	sub := claimSub(tok.Claims)
+	roles := claimRoles(tok.Claims)
+	admin := false
+	for _, r := range roles {
+		if r == "admin" {
+			admin = true
+		}
+	}
+	return runtime.Identity{UserID: sub, Subject: sub, Verified: true, Roles: roles, Admin: admin}, nil
 }
 
 func claimSub(claims jwt.Claims) string {
@@ -45,6 +55,24 @@ func claimSub(claims jwt.Claims) string {
 		}
 	}
 	return ""
+}
+
+func claimRoles(claims jwt.Claims) []string {
+	mc, ok := claims.(jwt.MapClaims)
+	if !ok {
+		return nil
+	}
+	raw, ok := mc["roles"].([]any)
+	if !ok {
+		return nil
+	}
+	var roles []string
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			roles = append(roles, s)
+		}
+	}
+	return roles
 }
 
 // newAgentsServer builds a production-mode server (verified-identity
@@ -70,6 +98,22 @@ func newDemoAgentsServer(t *testing.T) *runtime.Server {
 func tokenFor(t *testing.T, subject string) string {
 	t.Helper()
 	return agentSignHS256(t, "server-secret", subject)
+}
+
+// adminTokenFor signs a token carrying the admin role — the OIDC-mapped
+// admin identity required by requireAdminIdentity-gated routes.
+func adminTokenFor(t *testing.T, subject string) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":   subject,
+		"roles": []string{"admin"},
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	signed, err := tok.SignedString([]byte("server-secret"))
+	if err != nil {
+		t.Fatalf("sign admin token: %v", err)
+	}
+	return signed
 }
 
 // agentSignHS256 signs an HS256 JWT with an exp claim (mirrors the

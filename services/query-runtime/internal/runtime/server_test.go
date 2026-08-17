@@ -79,6 +79,13 @@ func TestHealthEndpoints(t *testing.T) {
 			t.Fatalf("expected %s to return 200, got %d: %s", path, rec.Code, rec.Body.String())
 		}
 	}
+	// /healthz body is exactly {"status":"ok"} (k8s liveness).
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	server.Routes().ServeHTTP(rec, req)
+	if strings.TrimSpace(rec.Body.String()) != `{"status":"ok"}` {
+		t.Fatalf("expected exact /healthz body, got %s", rec.Body.String())
+	}
 }
 
 func TestQueryIgnoresTenantIDFromBody(t *testing.T) {
@@ -453,7 +460,7 @@ func TestReadyz_HealthyProbe_ReturnsReady(t *testing.T) {
 func TestReadyz_FailingProbe_Returns503(t *testing.T) {
 	s := newTestServer(Config{})
 	s.AddReadinessProbe(ReadinessProbe{
-		Name:  "postgres",
+		Name:  "spicedb",
 		Check: func(context.Context) error { return errors.New("dial tcp: connection refused") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -462,34 +469,31 @@ func TestReadyz_FailingProbe_Returns503(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 with failing probe, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"probe":"postgres"`) {
-		t.Fatalf("expected probe name in body, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"failing":["spicedb"]`) {
+		t.Fatalf("expected failing dependency list in body, got %s", rec.Body.String())
 	}
-	// Reason should be the structured code, not the raw DB error
+	// Status should be the structured code, not the raw DB error
 	// (no leakage of connection-string details to public readyz).
-	if !strings.Contains(rec.Body.String(), `"reason":"dependency_unhealthy"`) {
-		t.Fatalf("expected sanitized reason code, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("expected degraded status code, got %s", rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "connection refused") {
 		t.Fatalf("raw error should NOT leak into readyz body: %s", rec.Body.String())
 	}
 }
 
-// TestReadyz_FirstFailingProbeIsReported pins that probes are run in
-// registration order and the first failure short-circuits.
-func TestReadyz_FirstFailingProbeIsReported(t *testing.T) {
+// TestReadyz_AllFailingProbesReported pins that every failing
+// dependency is listed in the "failing" array (probes are run in
+// registration order, no short-circuit).
+func TestReadyz_AllFailingProbesReported(t *testing.T) {
 	s := newTestServer(Config{})
-	spiceDBReached := false
 	s.AddReadinessProbe(ReadinessProbe{
 		Name:  "postgres",
 		Check: func(context.Context) error { return errors.New("pg down") },
 	})
 	s.AddReadinessProbe(ReadinessProbe{
-		Name: "spicedb",
-		Check: func(context.Context) error {
-			spiceDBReached = true
-			return nil
-		},
+		Name:  "spicedb",
+		Check: func(context.Context) error { return errors.New("spicedb down") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
@@ -497,10 +501,10 @@ func TestReadyz_FirstFailingProbeIsReported(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rec.Code)
 	}
-	if spiceDBReached {
-		t.Fatal("spicedb probe should not be reached when postgres probe fails first")
+	if !strings.Contains(rec.Body.String(), `"failing":["postgres","spicedb"]`) {
+		t.Fatalf("expected both failing deps reported, got %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"probe":"postgres"`) {
-		t.Fatalf("expected postgres probe to be reported, got %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "pg down") || strings.Contains(rec.Body.String(), "spicedb down") {
+		t.Fatalf("raw errors should NOT leak into readyz body: %s", rec.Body.String())
 	}
 }

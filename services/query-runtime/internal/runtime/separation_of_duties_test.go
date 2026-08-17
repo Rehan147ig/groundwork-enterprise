@@ -76,51 +76,51 @@ func TestKeyAdminRoleMintsKeysButNotGrantsOrTenants(t *testing.T) {
 	key := h.mintOperatorKey(t, "key-admin", []string{"key_admin"})
 
 	// Key management: allowed (201).
-	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, "", `{"name":"worker","scopes":["query"]}`)
+	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, adminTokenFor(t, govOwner), `{"name":"worker","scopes":["query"]}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("key_admin create key: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// Break-glass and tenant provisioning: forbidden — one role, one duty.
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "key_admin open grant")
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, tokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "key_admin provision")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "key_admin open grant")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, adminTokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "key_admin provision")
 }
 
 func TestBreakGlassRoleOpensGrantsButNotKeysOrTenants(t *testing.T) {
 	h := newSODHarness(t)
 	key := h.mintOperatorKey(t, "bg-ops", []string{"break_glass"})
 
-	rec := doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
+	rec := doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("break_glass open grant: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, "", `{"name":"sneaky","scopes":["admin"]}`), "break_glass mint key")
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, tokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "break_glass provision")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, adminTokenFor(t, govOwner), `{"name":"sneaky","scopes":["admin"]}`), "break_glass mint key")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, adminTokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "break_glass provision")
 }
 
 func TestProvisionRoleManagesTenantsButNotKeysOrGrants(t *testing.T) {
 	h := newSODHarness(t)
 	key := h.mintOperatorKey(t, "tenant-ops", []string{"provision"})
 
-	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, tokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`)
+	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, adminTokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("provision create tenant: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, "", `{"name":"worker","scopes":["query"]}`), "provision mint key")
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "provision open grant")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, adminTokenFor(t, govOwner), `{"name":"worker","scopes":["query"]}`), "provision mint key")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "provision open grant")
 }
 
 func TestLegacyAdminSatisfiesEveryOperatorRole(t *testing.T) {
 	h := newSODHarness(t)
 
-	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", govAdminKey, "", `{"name":"worker","scopes":["query"]}`)
+	rec := doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", govAdminKey, adminTokenFor(t, govOwner), `{"name":"worker","scopes":["query"]}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("legacy admin create key: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	rec = doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
+	rec = doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("legacy admin open grant: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	rec = doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, tokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`)
+	rec = doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, adminTokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("legacy admin provision: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -131,6 +131,6 @@ func TestQueryOnlyKeyIsNoOperator(t *testing.T) {
 	key := h.mintOperatorKey(t, "query-only", []string{"query"})
 
 	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/api-keys", key, "", `{"name":"x","scopes":["query"]}`), "query key mint")
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "query key grant")
-	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, tokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "query key provision")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/security/break-glass/grants", key, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`), "query key grant")
+	expectDenied(t, doSOD(t, h.s, http.MethodPost, "/v1/admin/tenants", key, adminTokenFor(t, govOwner), `{"tenant_id":"tenant-sod","region":"us-east-1","reason":"onboarding"}`), "query key provision")
 }

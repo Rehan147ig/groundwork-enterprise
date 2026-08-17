@@ -264,6 +264,101 @@ func TestOIDCNoAdminWithoutConfiguredRoles(t *testing.T) {
 	}
 }
 
+func TestOIDCMissingRolesClaimIsNotAdmin(t *testing.T) {
+	iss := newOIDCTestIssuer(t)
+	v := oidcVerifier(t, iss, nil) // AdminRoles = [security-admin]
+	id, err := v.Verify(context.Background(), iss.token(t, map[string]any{"roles": []string{}}))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if id.Admin {
+		t.Fatal("token with no roles claim must not map to Admin")
+	}
+	if len(id.Roles) != 0 {
+		t.Fatalf("roles = %v, want empty", id.Roles)
+	}
+}
+
+func TestOIDCMissingTenantClaimFailsClosed(t *testing.T) {
+	iss := newOIDCTestIssuer(t)
+	v := oidcVerifier(t, iss, nil)
+	if _, err := v.Verify(context.Background(), iss.token(t, map[string]any{"tid": ""})); err == nil {
+		t.Fatal("missing tenant claim must fail closed")
+	}
+}
+
+func TestOIDCMissingCanonicalClaimFailsClosed(t *testing.T) {
+	iss := newOIDCTestIssuer(t)
+	v := oidcVerifier(t, iss, nil)
+	if _, err := v.Verify(context.Background(), iss.token(t, map[string]any{"sub": ""})); err == nil {
+		t.Fatal("missing canonical (sub) claim must fail closed")
+	}
+}
+
+// TestOIDCTenantClaimSubFailsClosed: "sub" is the per-user subject
+// identifier, not a tenant identifier — two Okta orgs can issue the
+// same sub for different users. Using sub as the tenant claim must fail
+// closed at startup (no verifier is ever constructed), even when an
+// org allowlist would otherwise gate tenant values.
+func TestOIDCTenantClaimSubFailsClosed(t *testing.T) {
+	iss := newOIDCTestIssuer(t)
+	if _, err := NewOIDCVerifier(OIDCConfig{
+		Issuer:          iss.issuer,
+		ClientID:        "groundwork-console",
+		Algorithms:      []string{"RS256"},
+		TenantClaim:     "sub",
+		TenantAllowlist: []string{"acme"},
+		HTTPClient:      iss.srv.Client(),
+	}); err == nil || !strings.Contains(err.Error(), "must not be") {
+		t.Fatalf("TENANT_CLAIM=sub with an org allowlist must fail closed at construction, got %v", err)
+	}
+	// Same gate through the deployment env path (validation fires
+	// before discovery, so a dummy https issuer suffices).
+	t.Setenv("GROUNDWORK_OIDC_ISSUER", "https://example.okta.com/oauth2/default")
+	t.Setenv("GROUNDWORK_OIDC_CLIENT_ID", "groundwork-console")
+	t.Setenv("GROUNDWORK_OIDC_ALGORITHMS", "RS256")
+	t.Setenv("GROUNDWORK_OIDC_TENANT_CLAIM", "sub")
+	t.Setenv("GROUNDWORK_OIDC_TENANT_ALLOWLIST", "acme")
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil || !strings.Contains(err.Error(), "must not be") {
+		t.Fatalf("GROUNDWORK_OIDC_TENANT_CLAIM=sub must fail validation, got %v", err)
+	}
+}
+
+func TestOIDCEnvConfigValidation(t *testing.T) {
+	// Issuer set with no client id / audience must fail.
+	t.Setenv("GROUNDWORK_OIDC_ISSUER", "https://login.microsoftonline.com/example/v2.0")
+	t.Setenv("GROUNDWORK_OIDC_CLIENT_ID", "")
+	t.Setenv("GROUNDWORK_OIDC_AUDIENCE", "")
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil {
+		t.Fatal("issuer without client id or audience must fail validation")
+	}
+	// Non-https issuer must fail.
+	t.Setenv("GROUNDWORK_OIDC_CLIENT_ID", "app-id")
+	t.Setenv("GROUNDWORK_OIDC_ISSUER", "http://insecure.example")
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil {
+		t.Fatal("http issuer must fail validation")
+	}
+	// Tenant allow-list without explicit tenant claim must fail.
+	t.Setenv("GROUNDWORK_OIDC_ISSUER", "https://login.microsoftonline.com/example/v2.0")
+	t.Setenv("GROUNDWORK_OIDC_TENANT_ALLOWLIST", "acme")
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil {
+		t.Fatal("tenant allow-list without explicit tenant claim must fail validation")
+	}
+	t.Setenv("GROUNDWORK_OIDC_TENANT_CLAIM", "tid")
+	// Admin roles without explicit roles claim must fail.
+	t.Setenv("GROUNDWORK_OIDC_ADMIN_ROLES", "security-admin")
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil {
+		t.Fatal("admin roles without explicit roles claim must fail validation")
+	}
+	t.Setenv("GROUNDWORK_OIDC_ADMIN_ROLES_CLAIM", "roles")
+	// With all explicit config, the verifier must construct (against the
+	// unreachable issuer it fails at discovery, which is the correct
+	// fail-at-startup behavior).
+	if _, err := BuildOIDCVerifierFromEnv(); err == nil {
+		t.Fatal("verifier must fail construction on an unreachable issuer")
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

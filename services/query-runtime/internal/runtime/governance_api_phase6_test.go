@@ -21,11 +21,14 @@ const (
 	phase6RelBody = `{"parent_agent_id":"agent-1","child_agent_id":"agent-2","trust_domain":"finance","purpose":"vendor reconciliation","max_delegation_depth":2,"region":"us-east-1","expires_at":"2026-12-31T23:59:59Z"}`
 )
 
-// doGovM is a Phase 6 mutation helper: admin key + verified identity +
-// a deterministic Idempotency-Key header (mutations require it).
+// doGovM is a Phase 6 mutation helper: admin key + verified ADMIN
+// identity + a deterministic Idempotency-Key header (mutations require
+// it). An admin token also satisfies the verified-identity gate on the
+// owner-or-admin surfaces, so this helper is safe for every Phase 6
+// mutation route.
 func doGovM(t *testing.T, s *runtime.Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := govRequest(method, path, govAdminKey, tokenFor(t, govOwner), "", body)
+	req := govRequest(method, path, govAdminKey, adminTokenFor(t, govOwner), "", body)
 	req.Header.Set("Idempotency-Key", "test-idem-"+path)
 	rec := httptest.NewRecorder()
 	s.Routes().ServeHTTP(rec, req)
@@ -46,7 +49,7 @@ func TestPhase6MutationsRequireIdempotency(t *testing.T) {
 		{http.MethodPost, "/v1/governance/transfer-policies", `{"source_region":"eu-central-1","target_region":"us-east-1","purpose_pattern":"*","enabled":true}`},
 		{http.MethodPut, "/v1/governance/external-budgets/e1", `{"scope_type":"external_agent","external_agent_id":"e1","max_total_actions":10}`},
 	} {
-		req := govRequest(tc.method, tc.path, govAdminKey, tokenFor(t, govOwner), "", tc.body)
+		req := govRequest(tc.method, tc.path, govAdminKey, adminTokenFor(t, govOwner), "", tc.body)
 		rec := httptest.NewRecorder()
 		h.s.Routes().ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {

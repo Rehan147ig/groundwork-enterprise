@@ -181,7 +181,7 @@ func govErrorOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 // requires_approval flag (approval_required decision path).
 func govSetup(t *testing.T, s *runtime.Server, requiresApproval bool) (toolID, actionID, grantID string) {
 	t.Helper()
-	rec := doGov(t, s, http.MethodPost, "/v1/governance/tools", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, s, http.MethodPost, "/v1/governance/tools", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"name":"groundwork_search","description":"governed retrieval","transport":"builtin","owner_principal_id":"principal:alice","region":"us-east-1"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create tool: %d %s", rec.Code, rec.Body.String())
@@ -189,7 +189,7 @@ func govSetup(t *testing.T, s *runtime.Server, requiresApproval bool) (toolID, a
 	var toolResp runtime.GovernanceToolResponse
 	decodeGov(t, rec, &toolResp)
 
-	rec = doGov(t, s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/actions", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/actions", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"action":"search","resource_type":"document","risk_level":"low","read_only":true}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create action: %d %s", rec.Code, rec.Body.String())
@@ -197,7 +197,7 @@ func govSetup(t *testing.T, s *runtime.Server, requiresApproval bool) (toolID, a
 	var actionResp runtime.GovernanceToolActionResponse
 	decodeGov(t, rec, &actionResp)
 
-	rec = doGov(t, s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/lifecycle", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/lifecycle", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"lifecycle":"active"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("activate tool: %d %s", rec.Code, rec.Body.String())
@@ -209,7 +209,7 @@ func govSetup(t *testing.T, s *runtime.Server, requiresApproval bool) (toolID, a
 	}
 	grantBody := `{"agent_id":"agent-1","version_id":"version-1","tool_id":"` + toolResp.Tool.ID +
 		`","action_id":"` + actionResp.Action.ID + `"` + approval + `}`
-	rec = doGov(t, s, http.MethodPost, "/v1/governance/grants", govAdminKey, tokenFor(t, govOwner), "", grantBody)
+	rec = doGov(t, s, http.MethodPost, "/v1/governance/grants", govAdminKey, adminTokenFor(t, govOwner), "", grantBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
 	}
@@ -286,7 +286,7 @@ func TestGovernanceToolsCRUDAndLifecycle(t *testing.T) {
 	toolID, actionID, _ := govSetup(t, h.s, false)
 
 	// Duplicate tool name -> 409.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/tools", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/tools", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"name":"groundwork_search","description":"again","transport":"builtin","owner_principal_id":"principal:alice","region":"us-east-1"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
@@ -359,7 +359,7 @@ func TestGovernanceGrantsLifecycleAndRevokeFailsClosed(t *testing.T) {
 		t.Fatalf("create run: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/grants/"+grantID+"/revoke", govAdminKey, tokenFor(t, govOwner), "", `{"reason":"compliance hold"}`)
+	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/grants/"+grantID+"/revoke", govAdminKey, adminTokenFor(t, govOwner), "", `{"reason":"compliance hold"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
 	}
@@ -589,25 +589,25 @@ func TestGovernanceDispatchConnectorQuotaDenied(t *testing.T) {
 	h := newGovAPIHarness(t)
 
 	// Register an http-transport tool, activate it, and grant it.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/tools", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/tools", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"name":"webhook","description":"external hook","transport":"http","endpoint_or_server":"https://hooks.example.com","owner_principal_id":"principal:alice","region":"us-east-1"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create tool: %d %s", rec.Code, rec.Body.String())
 	}
 	var toolResp runtime.GovernanceToolResponse
 	decodeGov(t, rec, &toolResp)
-	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/actions", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/actions", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"action":"send","resource_type":"document","risk_level":"low","read_only":true}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create action: %d %s", rec.Code, rec.Body.String())
 	}
 	var actionResp runtime.GovernanceToolActionResponse
 	decodeGov(t, rec, &actionResp)
-	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/lifecycle", govAdminKey, tokenFor(t, govOwner), "", `{"lifecycle":"active"}`)
+	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/tools/"+toolResp.Tool.ID+"/lifecycle", govAdminKey, adminTokenFor(t, govOwner), "", `{"lifecycle":"active"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("activate tool: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/grants", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, h.s, http.MethodPost, "/v1/governance/grants", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"agent_id":"agent-1","version_id":"version-1","tool_id":"`+toolResp.Tool.ID+`","action_id":"`+actionResp.Action.ID+`"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
@@ -793,7 +793,7 @@ func TestGovernanceSimulateWouldDenyOverHTTP(t *testing.T) {
 	h := newGovAPIHarness(t)
 	_, _, grantID := govSetup(t, h.s, false)
 	// Revoke the grant so the coverage gate must fail closed.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/grants/"+grantID+"/revoke", govAdminKey, tokenFor(t, govOwner), "", `{"reason":"compliance hold"}`)
+	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/grants/"+grantID+"/revoke", govAdminKey, adminTokenFor(t, govOwner), "", `{"reason":"compliance hold"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
 	}

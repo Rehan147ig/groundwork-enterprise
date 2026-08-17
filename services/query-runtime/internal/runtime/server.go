@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"groundwork/query-runtime/internal/aclsync"
 	gwmetrics "groundwork/query-runtime/internal/metrics"
 	"groundwork/query-runtime/internal/usage"
 
@@ -49,6 +50,14 @@ type Server struct {
 	// endpoints return 503 connector_unavailable. Wired via
 	// SetGitHubService from cmd/query-runtime (impl in connectorsvc).
 	githubSvc GitHubService
+
+	// leakHistorySvc is the optional snapshot/drift surface for the
+	// scheduled leak-report runs (GET /v1/leak-report/history and
+	// GET /v1/leak-report/diff). Nil-safe: when unset, those endpoints
+	// return 503 leak_history_unavailable. Wired via
+	// SetLeakHistoryService from cmd/query-runtime (impl in
+	// internal/leakreport).
+	leakHistorySvc LeakHistoryService
 
 	// readinessProbes is the optional set of dependency probes that
 	// /readyz invokes on every call. PR #22 HA fix #3: today /readyz
@@ -128,6 +137,22 @@ type Server struct {
 	// acl_sync_webhook_unavailable. Wired via SetACLSyncWebhooks from
 	// cmd/query-runtime (impl in internal/aclsync/webhook).
 	aclSyncWebhooks *ACLSyncWebhookHandler
+
+	// connectorStatusStore is the optional connector installation store
+	// behind /v1/connectors/status (Milestone 3 console status). Nil-safe:
+	// when unset, the endpoint returns 503 connector_status_unavailable.
+	// Wired via SetConnectorStatusStore from cmd/query-runtime (impl in
+	// internal/aclsync).
+	connectorStatusStore aclsync.InstallationStore
+
+	// notifier delivers security notifications (Slack/Teams) for
+	// break-glass lifecycle events (Milestone 5). Nil-safe: when unset,
+	// deliveries are skipped but recorded as notification_failed
+	// evidence with an alert — an emergency action never silently
+	// succeeds without a visible delivery attempt. Wired via
+	// SetNotifier from cmd/query-runtime (impl in
+	// internal/notifications).
+	notifier NotificationService
 }
 
 // ReadinessProbe is one /readyz dependency check. Implementations must
@@ -260,9 +285,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("POST /v1/query", s.requireAPIKey("query", s.identityOrDelegation(s.query)))
-	mux.HandleFunc("POST /v1/admin/api-keys", s.requireAPIKey(keyAdminScope, s.createAPIKey))
-	mux.HandleFunc("POST /v1/admin/api-keys/{id}/rotate", s.requireAPIKey(keyAdminScope, s.rotateAPIKey))
-	mux.HandleFunc("DELETE /v1/admin/api-keys/{id}", s.requireAPIKey(keyAdminScope, s.revokeAPIKey))
+	// API-key administration (Phase 8.4 key_admin scope) now also
+	// requires a verified ADMIN identity — minting, rotating or revoking
+	// tenant keys is a privileged operation that no non-admin caller may
+	// perform, and no identity-less caller may reach.
+	mux.HandleFunc("POST /v1/admin/api-keys", s.requireAPIKey(keyAdminScope, s.requireAdminIdentity(s.createAPIKey)))
+	mux.HandleFunc("POST /v1/admin/api-keys/{id}/rotate", s.requireAPIKey(keyAdminScope, s.requireAdminIdentity(s.rotateAPIKey)))
+	mux.HandleFunc("DELETE /v1/admin/api-keys/{id}", s.requireAPIKey(keyAdminScope, s.requireAdminIdentity(s.revokeAPIKey)))
 	// PR #22: Audit Read API. Read-only. Requires the new "audit" scope
 	// (admin scope inherits via hasScope's existing override). All four
 	// endpoints honor the tenant_id from the API-key context only —
@@ -278,6 +307,10 @@ func (s *Server) Routes() http.Handler {
 	// scope, admin inherits).
 	mux.HandleFunc("POST /v1/connect/github", s.requireAPIKey("admin", s.connectGitHub))
 	mux.HandleFunc("GET /v1/leak-report", s.requireAPIKey(auditScope, s.leakReport))
+	// Scheduled leak-report history + drift. Read-only (audit scope,
+	// admin inherits); tenant comes only from the API-key context.
+	mux.HandleFunc("GET /v1/leak-report/history", s.requireAPIKey(auditScope, s.leakReportHistory))
+	mux.HandleFunc("GET /v1/leak-report/diff", s.requireAPIKey(auditScope, s.leakReportDiff))
 	// Agent Registry (Phase 1: Agent Trust and Control Plane). Every
 	// agent is a tenant-scoped identity with lifecycle state, versions,
 	// and a tamper-evident event chain. Tenant comes from the API-key
@@ -302,14 +335,14 @@ func (s *Server) Routes() http.Handler {
 	// (enforced in the handlers — a demo actor can never mint a
 	// delegation or approve an action). Run/evaluate/dispatch endpoints
 	// authenticate via the delegation token itself and need no identity.
-	mux.HandleFunc("POST /v1/governance/tools", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceTool)))
+	mux.HandleFunc("POST /v1/governance/tools", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.createGovernanceTool)))
 	mux.HandleFunc("GET /v1/governance/tools", s.requireAPIKey(governanceScope, s.listGovernanceTools))
 	mux.HandleFunc("GET /v1/governance/tools/{tool_id}", s.requireAPIKey(governanceScope, s.getGovernanceTool))
-	mux.HandleFunc("POST /v1/governance/tools/{tool_id}/actions", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceToolAction)))
+	mux.HandleFunc("POST /v1/governance/tools/{tool_id}/actions", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.createGovernanceToolAction)))
 	mux.HandleFunc("GET /v1/governance/tools/{tool_id}/actions", s.requireAPIKey(governanceScope, s.listGovernanceToolActions))
-	mux.HandleFunc("POST /v1/governance/tools/{tool_id}/lifecycle", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.transitionGovernanceTool)))
-	mux.HandleFunc("POST /v1/governance/grants", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceGrant)))
-	mux.HandleFunc("POST /v1/governance/grants/{grant_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.revokeGovernanceGrant)))
+	mux.HandleFunc("POST /v1/governance/tools/{tool_id}/lifecycle", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.transitionGovernanceTool)))
+	mux.HandleFunc("POST /v1/governance/grants", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.createGovernanceGrant)))
+	mux.HandleFunc("POST /v1/governance/grants/{grant_id}/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.revokeGovernanceGrant)))
 	mux.HandleFunc("GET /v1/governance/agents/{agent_id}/grants", s.requireAPIKey(governanceScope, s.listGovernanceGrants))
 	mux.HandleFunc("POST /v1/governance/delegations", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.mintGovernanceDelegation)))
 	mux.HandleFunc("POST /v1/governance/runs", s.requireAPIKey(governanceScope, s.createGovernanceRun))
@@ -335,7 +368,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.revokeGovernanceDelegation)))
 	mux.HandleFunc("POST /v1/governance/runs/{run_id}/terminate", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.terminateGovernanceRun)))
 	mux.HandleFunc("GET /v1/governance/emergency-controls", s.requireAPIKey(governanceScope, s.listGovernanceEmergencyControls))
-	mux.HandleFunc("POST /v1/governance/budgets", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.upsertGovernanceBudget)))
+	mux.HandleFunc("POST /v1/governance/budgets", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.upsertGovernanceBudget)))
 	mux.HandleFunc("GET /v1/governance/budgets/effective", s.requireAPIKey(governanceScope, s.getGovernanceEffectiveBudget))
 	mux.HandleFunc("GET /v1/governance/budgets", s.requireAPIKey(governanceScope, s.listGovernanceBudgets))
 	mux.HandleFunc("GET /v1/governance/evidence", s.requireAPIKey(governanceScope, s.queryGovernanceEvidence))
@@ -348,26 +381,34 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/governance/outbox/{event_id}/retry", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.retryGovernanceOutbox)))
 	mux.HandleFunc("GET /v1/governance/exports/{framework}", s.requireAPIKey(governanceScope, s.getGovernanceExport))
 	// Governance (Phase 5: Production Connector Gateway). Registry
-	// mutations require a verified identity (owner-or-admin); reads
-	// need the governance scope. Dispatch is reached exclusively
-	// through POST /v1/governance/dispatch after an allowed decision.
-	mux.HandleFunc("POST /v1/governance/connectors", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.registerConnector)))
+	// mutations require a verified ADMIN identity (registering a
+	// connector binds a real external service and its credential into
+	// the tenant); reads need the governance scope. Dispatch is reached
+	// exclusively through POST /v1/governance/dispatch after an allowed
+	// decision.
+	mux.HandleFunc("POST /v1/governance/connectors", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.registerConnector)))
 	mux.HandleFunc("GET /v1/governance/connectors", s.requireAPIKey(governanceScope, s.listConnectors))
 	mux.HandleFunc("GET /v1/governance/connectors/{connector_id}", s.requireAPIKey(governanceScope, s.getConnector))
 	mux.HandleFunc("GET /v1/governance/connectors/{connector_id}/manifest", s.requireAPIKey(governanceScope, s.getConnectorManifest))
-	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/activate", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.activateConnector)))
-	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/suspend", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.suspendConnector)))
-	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.revokeConnector)))
-	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/config", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.updateConnectorConfig)))
+	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/activate", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.activateConnector)))
+	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/suspend", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.suspendConnector)))
+	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.revokeConnector)))
+	mux.HandleFunc("POST /v1/governance/connectors/{connector_id}/config", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.updateConnectorConfig)))
 	mux.HandleFunc("GET /v1/governance/connectors/{connector_id}/health", s.requireAPIKey(governanceScope, s.connectorHealthProbe))
+
+	// Milestone 3: connector installation status (health, lag, drift,
+	// credential expiry) for the console — tenant-scoped, no secrets.
+	mux.HandleFunc("GET /v1/connectors/status", s.requireAPIKey(connectorStatusScope, s.connectorStatusHandler))
 	// Governance (Phase 6: Multi-Agent Delegation & External-Agent
 	// Trust). Tenant/region come from the API-key context only; reads
 	// require the governance scope (admin inherits). Mutations require a
-	// verified end-user identity AND an Idempotency-Key header; the
-	// service enforces owner-or-admin (trust relationships) or
-	// admin-only (external agents, consents, transfer policies, chain
-	// controls, external budgets). External runs authenticate through
-	// the external identity token itself (no end-user identity needed).
+	// verified identity AND an Idempotency-Key header; the service
+	// enforces owner-or-admin (trust relationships) or admin-only
+	// (external agents, consents, transfer policies, chain controls,
+	// external budgets), and the router additionally wraps the admin-only
+	// surfaces in requireAdminIdentity so the OIDC admin role is enforced
+	// before the handler runs. External runs authenticate through the
+	// external identity token itself (no end-user identity needed).
 	mux.HandleFunc("POST /v1/governance/trust-relationships", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceTrustRelationship)))
 	mux.HandleFunc("GET /v1/governance/trust-relationships", s.requireAPIKey(governanceScope, s.listGovernanceTrustRelationships))
 	mux.HandleFunc("GET /v1/governance/trust-relationships/{relationship_id}", s.requireAPIKey(governanceScope, s.getGovernanceTrustRelationship))
@@ -378,65 +419,72 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/governance/trust-relationships/{relationship_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceTrustTransition("revoke"))))
 	mux.HandleFunc("GET /v1/governance/delegations", s.requireAPIKey(governanceScope, s.listGovernanceDelegationGrants))
 	mux.HandleFunc("GET /v1/governance/delegations/{grant_id}/chain", s.requireAPIKey(governanceScope, s.getGovernanceDelegationChain))
-	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceChainControl("revoke"))))
-	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/suspend", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceChainControl("suspend"))))
-	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/resume", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceChainControl("resume"))))
+	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceChainControl("revoke"))))
+	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/suspend", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceChainControl("suspend"))))
+	mux.HandleFunc("POST /v1/governance/delegations/{grant_id}/chain/resume", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceChainControl("resume"))))
 	mux.HandleFunc("GET /v1/governance/runs/{run_id}/delegation-chain", s.requireAPIKey(governanceScope, s.getGovernanceRunDelegationChain))
 	mux.HandleFunc("GET /v1/governance/evidence/{evidence_id}/provenance", s.requireAPIKey(governanceScope, s.getGovernanceEvidenceProvenance))
-	mux.HandleFunc("POST /v1/governance/external-agents", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceExternalAgent)))
+	mux.HandleFunc("POST /v1/governance/external-agents", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.createGovernanceExternalAgent)))
 	mux.HandleFunc("GET /v1/governance/external-agents", s.requireAPIKey(governanceScope, s.listGovernanceExternalAgents))
 	mux.HandleFunc("GET /v1/governance/external-agents/{external_agent_id}", s.requireAPIKey(governanceScope, s.getGovernanceExternalAgent))
 	mux.HandleFunc("GET /v1/governance/external-agents/{external_agent_id}/health", s.requireAPIKey(governanceScope, s.governanceExternalAgentHealth))
-	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/activate", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceExternalAgentTransition("activate"))))
-	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/suspend", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceExternalAgentTransition("suspend"))))
-	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceExternalAgentTransition("revoke"))))
+	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/activate", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceExternalAgentTransition("activate"))))
+	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/suspend", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceExternalAgentTransition("suspend"))))
+	mux.HandleFunc("POST /v1/governance/external-agents/{external_agent_id}/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceExternalAgentTransition("revoke"))))
 	mux.HandleFunc("POST /v1/governance/external-runs", s.requireAPIKey(governanceScope, s.createGovernanceExternalRun))
 	mux.HandleFunc("GET /v1/governance/external-runs", s.requireAPIKey(governanceScope, s.listGovernanceExternalRuns))
 	mux.HandleFunc("GET /v1/governance/external-runs/{run_id}", s.requireAPIKey(governanceScope, s.getGovernanceExternalRun))
-	mux.HandleFunc("POST /v1/governance/external-runs/{run_id}/terminate", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.terminateGovernanceExternalRun)))
-	mux.HandleFunc("POST /v1/governance/consents", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.createGovernanceConsentRecord)))
+	mux.HandleFunc("POST /v1/governance/external-runs/{run_id}/terminate", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.terminateGovernanceExternalRun)))
+	mux.HandleFunc("POST /v1/governance/consents", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.createGovernanceConsentRecord)))
 	mux.HandleFunc("GET /v1/governance/consents", s.requireAPIKey(governanceScope, s.listGovernanceConsentRecords))
 	mux.HandleFunc("GET /v1/governance/consents/{consent_id}", s.requireAPIKey(governanceScope, s.getGovernanceConsentRecord))
-	mux.HandleFunc("POST /v1/governance/consents/{consent_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.revokeGovernanceConsentRecord)))
-	mux.HandleFunc("POST /v1/governance/transfer-policies", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.upsertGovernanceTransferPolicy)))
+	mux.HandleFunc("POST /v1/governance/consents/{consent_id}/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.revokeGovernanceConsentRecord)))
+	mux.HandleFunc("POST /v1/governance/transfer-policies", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.upsertGovernanceTransferPolicy)))
 	mux.HandleFunc("GET /v1/governance/transfer-policies", s.requireAPIKey(governanceScope, s.listGovernanceTransferPolicies))
-	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/activate", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceTransferPolicyTransition("activate"))))
-	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/suspend", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceTransferPolicyTransition("suspend"))))
-	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/revoke", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.governanceTransferPolicyTransition("revoke"))))
+	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/activate", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceTransferPolicyTransition("activate"))))
+	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/suspend", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceTransferPolicyTransition("suspend"))))
+	mux.HandleFunc("POST /v1/governance/transfer-policies/{policy_id}/revoke", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.governanceTransferPolicyTransition("revoke"))))
 	mux.HandleFunc("GET /v1/governance/external-budgets", s.requireAPIKey(governanceScope, s.listGovernanceExternalBudgets))
-	mux.HandleFunc("PUT /v1/governance/external-budgets/{external_agent_id}", s.requireAPIKey(governanceScope, s.requireVerifiedIdentity(s.upsertGovernanceExternalBudget)))
+	mux.HandleFunc("PUT /v1/governance/external-budgets/{external_agent_id}", s.requireAPIKey(governanceScope, s.requireAdminIdentity(s.upsertGovernanceExternalBudget)))
 	// Usage Metering (Phase 8.1): tenant-scoped usage snapshot and
 	// quota rows. Reads need the "usage" scope (admin inherits); the
 	// limits mutation requires a verified identity AND an
 	// Idempotency-Key header (Phase 6 mutation convention).
 	mux.HandleFunc("GET /v1/usage", s.requireAPIKey(usageScope, s.getUsage))
 	mux.HandleFunc("GET /v1/usage/limits", s.requireAPIKey(usageScope, s.getUsageLimits))
-	mux.HandleFunc("PUT /v1/usage/limits", s.requireAPIKey(usageScope, s.requireVerifiedIdentity(s.putUsageLimits)))
+	mux.HandleFunc("PUT /v1/usage/limits", s.requireAPIKey(usageScope, s.requireAdminIdentity(s.putUsageLimits)))
 	// Break-Glass Operator Access (Phase 8.4): time-bounded emergency
 	// admin access with mandatory reasons and hash-chained evidence.
-	// Requires the "admin" scope; Open/Revoke additionally require a
-	// verified operator identity.
-	mux.HandleFunc("POST /v1/security/break-glass/grants", s.requireAPIKey(breakGlassScope, s.requireVerifiedIdentity(s.openBreakGlassGrant)))
+	// Requires the "admin" scope; Open/Approve/Reject/Revoke additionally
+	// require a verified ADMIN identity (OIDC role-mapped — break-glass
+	// is emergency administration).
+	mux.HandleFunc("POST /v1/security/break-glass/grants", s.requireAPIKey(breakGlassScope, s.requireAdminIdentity(s.openBreakGlassGrant)))
 	mux.HandleFunc("GET /v1/security/break-glass/grants", s.requireAPIKey(breakGlassScope, s.listBreakGlassGrants))
 	mux.HandleFunc("GET /v1/security/break-glass/grants/{id}", s.requireAPIKey(breakGlassScope, s.getBreakGlassGrant))
-	mux.HandleFunc("POST /v1/security/break-glass/grants/{id}/revoke", s.requireAPIKey(breakGlassScope, s.requireVerifiedIdentity(s.revokeBreakGlassGrant)))
+	mux.HandleFunc("POST /v1/security/break-glass/grants/{id}/approve", s.requireAPIKey(breakGlassScope, s.requireAdminIdentity(s.approveBreakGlassGrant)))
+	mux.HandleFunc("POST /v1/security/break-glass/grants/{id}/reject", s.requireAPIKey(breakGlassScope, s.requireAdminIdentity(s.rejectBreakGlassGrant)))
+	mux.HandleFunc("POST /v1/security/break-glass/grants/{id}/revoke", s.requireAPIKey(breakGlassScope, s.requireAdminIdentity(s.revokeBreakGlassGrant)))
+	// Slack interactive actions are signature-authenticated (X-Slack-
+	// Signature), replay-protected, and server-side role checked — no
+	// API key is involved.
+	mux.HandleFunc("POST /v1/security/slack/actions", s.handleSlackAction)
 	// Tenant provisioning (Phase 8.1): operator-managed tenant directory
 	// with lifecycle evidence. Requires the "provision" scope (admin
-	// inherits); mutations additionally require a verified identity.
-	// There is NO delete route: deprovisioning is the terminal,
-	// non-destructive lifecycle state (roadmap: "do not add destructive
-	// delete by default").
-	mux.HandleFunc("POST /v1/admin/tenants", s.requireAPIKey(tenantProvisionScope, s.requireVerifiedIdentity(s.provisionTenant)))
+	// inherits); mutations additionally require a verified ADMIN
+	// identity. There is NO delete route: deprovisioning is the
+	// terminal, non-destructive lifecycle state (roadmap: "do not add
+	// destructive delete by default").
+	mux.HandleFunc("POST /v1/admin/tenants", s.requireAPIKey(tenantProvisionScope, s.requireAdminIdentity(s.provisionTenant)))
 	mux.HandleFunc("GET /v1/admin/tenants", s.requireAPIKey(tenantProvisionScope, s.listTenants))
 	mux.HandleFunc("GET /v1/admin/tenants/{tenant_id}", s.requireAPIKey(tenantProvisionScope, s.getTenant))
 	mux.HandleFunc("GET /v1/admin/tenants/{tenant_id}/events", s.requireAPIKey(tenantProvisionScope, s.listTenantEvents))
-	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/disable", s.requireAPIKey(tenantProvisionScope, s.requireVerifiedIdentity(s.disableTenant)))
-	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/enable", s.requireAPIKey(tenantProvisionScope, s.requireVerifiedIdentity(s.enableTenant)))
-	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/deprovision", s.requireAPIKey(tenantProvisionScope, s.requireVerifiedIdentity(s.deprovisionTenant)))
+	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/disable", s.requireAPIKey(tenantProvisionScope, s.requireAdminIdentity(s.disableTenant)))
+	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/enable", s.requireAPIKey(tenantProvisionScope, s.requireAdminIdentity(s.enableTenant)))
+	mux.HandleFunc("POST /v1/admin/tenants/{tenant_id}/deprovision", s.requireAPIKey(tenantProvisionScope, s.requireAdminIdentity(s.deprovisionTenant)))
 	// Support Bundle (Phase 8.5): tenant-scoped diagnostics zip for
-	// operator escalation. Admin scope + verified identity (same bar as
-	// break-glass Open/Revoke); never contains secrets.
-	mux.HandleFunc("GET /v1/security/support-bundle", s.requireAPIKey(supportBundleScope, s.requireVerifiedIdentity(s.serveSupportBundle)))
+	// operator escalation. Admin scope + verified admin identity (same
+	// bar as break-glass administration); never contains secrets.
+	mux.HandleFunc("GET /v1/security/support-bundle", s.requireAPIKey(supportBundleScope, s.requireAdminIdentity(s.serveSupportBundle)))
 	// Real-time IAM sync webhooks (Entra ID lifecycle notifications,
 	// Okta system-log events). Signature-authenticated with the shared
 	// secret — the providers cannot hold API keys, so no API-key
@@ -466,7 +514,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "groundwork-query-runtime"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) livez(w http.ResponseWriter, _ *http.Request) {
@@ -475,32 +523,34 @@ func (s *Server) livez(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if s.apiKeys == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "api_key_resolver_unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "failing": []string{"api_key_resolver"}})
 		return
 	}
 	if s.executor == nil && (s.backend.Vector == nil || s.backend.ACL == nil || s.backend.Trace == nil) {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "runtime_backend_unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "failing": []string{"runtime_backend"}})
 		return
 	}
 	// PR #22 HA fix #3: probe registered dependencies (Postgres,
-	// SpiceDB) on every call. A dead dependency removes this pod from
-	// the LB via k8s readiness; other pods continue to serve. Total
-	// probe budget is bounded so a slow probe doesn't extend the readyz
-	// response indefinitely (k8s would interpret a hung readyz as
-	// failure on readinessProbe.timeoutSeconds anyway).
+	// SpiceDB, L1 policy cache) on every call. A dead dependency
+	// removes this pod from the LB via k8s readiness; other pods
+	// continue to serve. Total probe budget is bounded so a slow probe
+	// doesn't extend the readyz response indefinitely (k8s would
+	// interpret a hung readyz as failure on
+	// readinessProbe.timeoutSeconds anyway). Every failing dependency
+	// is reported in the "failing" list, not just the first.
+	var failing []string
 	if len(s.readinessProbes) > 0 {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		for _, probe := range s.readinessProbes {
 			if err := probe.Check(ctx); err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-					"status": "not_ready",
-					"reason": "dependency_unhealthy",
-					"probe":  probe.Name,
-				})
-				return
+				failing = append(failing, probe.Name)
 			}
 		}
+	}
+	if len(failing) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "failing": failing})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
@@ -965,12 +1015,21 @@ func newCorrelationID() string {
 }
 
 func extractUserAssertion(r *http.Request) string {
-	value := strings.TrimSpace(r.Header.Get("X-Groundwork-User-Assertion"))
-	const prefix = "Bearer "
-	if strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
-		return strings.TrimSpace(value[len(prefix):])
+	if value := strings.TrimSpace(r.Header.Get("X-Groundwork-User-Assertion")); value != "" {
+		const prefix = "Bearer "
+		if strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
+			return strings.TrimSpace(value[len(prefix):])
+		}
+		return value
 	}
-	return value
+	// Enterprise OIDC: the console forwards the IdP-verified user JWT as
+	// "Authorization: Bearer <id_token>". Accept it only when the value is
+	// JWT-shaped, so a Bearer-carried API key is never mistaken for an
+	// identity assertion (see extractAPIKey for the mirror rule).
+	if bearer := bearerToken(r); looksLikeJWT(bearer) {
+		return bearer
+	}
+	return ""
 }
 
 // requireVerifiedIdentity enforces that /v1/query carries a cryptographically
@@ -988,6 +1047,49 @@ func (s *Server) requireVerifiedIdentity(next http.HandlerFunc) http.HandlerFunc
 			id, err := s.identity.Verify(r.Context(), token)
 			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_identity_assertion"})
+				return
+			}
+			ctx := context.WithValue(r.Context(), identityContextKey{}, identityDecision{identity: id})
+			next(w, r.WithContext(ctx))
+			return
+		}
+		if !s.allowDemoIdentity {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "verified_identity_required"})
+			return
+		}
+		ctx := context.WithValue(r.Context(), identityContextKey{}, identityDecision{demo: true})
+		next(w, r.WithContext(ctx))
+	}
+}
+
+// requireAdminIdentity enforces that privileged operations (tenant admin,
+// API-key admin, connector lifecycle/config, governance
+// grants/tools/policies/budgets, break-glass administration) run under a
+// verified ADMIN identity. "Admin" comes ONLY from the trusted OIDC role
+// mapping (Identity.Admin, set from the configured admin role values in
+// the verified token's roles claim) — never from a request body and never
+// from console-only RBAC.
+//
+// Local/dev: when allowDemoIdentity is set (which main.go only permits
+// for GROUNDWORK_ENV=local|dev), identity-less and non-admin callers are
+// treated as admin-equivalent so the demo console flows keep working.
+// Production runs with allowDemoIdentity=false, so a demo identity or a
+// verified non-admin is always rejected: 403 admin_identity_required.
+func (s *Server) requireAdminIdentity(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := extractUserAssertion(r)
+		if token != "" {
+			if s.identity == nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "identity_verifier_unavailable"})
+				return
+			}
+			id, err := s.identity.Verify(r.Context(), token)
+			if err != nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_identity_assertion"})
+				return
+			}
+			if !s.allowDemoIdentity && !id.Admin {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin_identity_required"})
 				return
 			}
 			ctx := context.WithValue(r.Context(), identityContextKey{}, identityDecision{identity: id})

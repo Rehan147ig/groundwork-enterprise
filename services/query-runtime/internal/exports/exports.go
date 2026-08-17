@@ -193,6 +193,34 @@ func Frameworks() []Framework {
 				{ID: "c_3_config", Title: "Configuration management", EvidenceKinds: []string{EvidenceKindEmergencyControl, EvidenceKindDelegationRevoke}},
 			},
 		},
+		{
+			ID:           "soc2_type2",
+			Name:         "SOC 2 Type II",
+			Jurisdiction: "us",
+			Controls: []Control{
+				{ID: "cc6.1_access_control", Title: "CC6.1 Access Control", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindApproval}},
+				{ID: "cc6.6_encryption", Title: "CC6.6 Encryption", EvidenceKinds: []string{EvidenceKindDecision}},
+				{ID: "cc7.2_audit_logging", Title: "CC7.2 Audit Logging", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindEmergencyControl}},
+			},
+		},
+		{
+			ID:           "pci_dss_v4",
+			Name:         "PCI DSS v4",
+			Jurisdiction: "us",
+			Controls: []Control{
+				{ID: "req7_restrict_access", Title: "Requirement 7 – Restrict access to system components", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindApproval}},
+				{ID: "req10_log_monitor", Title: "Requirement 10 – Log and monitor all access", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindEmergencyControl}},
+			},
+		},
+		{
+			ID:           "hipaa_security",
+			Name:         "HIPAA Security Rule",
+			Jurisdiction: "us",
+			Controls: []Control{
+				{ID: "hipaa_312_a1", Title: "§164.312(a)(1) Access Control", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindApproval}},
+				{ID: "hipaa_312_b", Title: "§164.312(b) Audit Controls", EvidenceKinds: []string{EvidenceKindDecision, EvidenceKindEmergencyControl}},
+			},
+		},
 	}
 }
 

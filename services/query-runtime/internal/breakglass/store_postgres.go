@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"time"
 
 	"groundwork/query-runtime/internal/runtime"
 )
@@ -42,13 +44,23 @@ type postgresTx struct {
 	db *sql.Tx
 }
 
-const grantColumns = `id::text, tenant_id, operator_principal_id, reason, duration_minutes, key_id, key_prefix, status, expires_at, requested_at, revoked_at, revoked_by, revocation_reason, immutable_digest, created_at`
+const grantColumns = `id::text, tenant_id, operator_principal_id, reason, duration_minutes, key_id, key_prefix, status, expires_at, requested_at, revoked_at, revoked_by, revocation_reason, immutable_digest, created_at, pending_approval_by, pending_approval_reason, approver1, approver2, approved_by_admin1_at, approved_by_admin2_at`
 
 func scanGrant(row interface{ Scan(...any) error }) (runtime.BreakGlassGrant, error) {
 	var g runtime.BreakGlassGrant
+	var keyID sql.NullInt64
+	var keyPrefix sql.NullString
 	err := row.Scan(&g.ID, &g.TenantID, &g.OperatorPrincipalID, &g.Reason, &g.DurationMinutes,
-		&g.KeyID, &g.KeyPrefix, &g.Status, &g.ExpiresAt, &g.RequestedAt,
-		&g.RevokedAt, &g.RevokedBy, &g.RevocationReason, &g.ImmutableDigest, &g.CreatedAt)
+		&keyID, &keyPrefix, &g.Status, &g.ExpiresAt, &g.RequestedAt,
+		&g.RevokedAt, &g.RevokedBy, &g.RevocationReason, &g.ImmutableDigest, &g.CreatedAt,
+		&g.PendingApprovalBy, &g.PendingApprovalReason, &g.Approver1, &g.Approver2,
+		&g.ApprovedByAdmin1At, &g.ApprovedByAdmin2At)
+	if keyID.Valid {
+		g.KeyID = keyID.Int64
+	}
+	if keyPrefix.Valid {
+		g.KeyPrefix = keyPrefix.String
+	}
 	return g, err
 }
 
@@ -108,11 +120,16 @@ func (p *postgresTx) ListEvents(ctx context.Context, tenantID, grantID string) (
 func (p *postgresTx) CreateGrant(ctx context.Context, g runtime.BreakGlassGrant) (runtime.BreakGlassGrant, error) {
 	row := p.db.QueryRowContext(ctx, `
 		INSERT INTO break_glass_grants
-			(tenant_id, operator_principal_id, reason, duration_minutes, key_id, key_prefix, status, expires_at, requested_at, immutable_digest)
-		VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
+			(tenant_id, operator_principal_id, reason, duration_minutes, key_id, key_prefix, status,
+			 expires_at, requested_at, immutable_digest,
+			 pending_approval_by, pending_approval_reason, approver1, approver2,
+			 approved_by_admin1_at, approved_by_admin2_at)
+		VALUES ($1, $2, $3, $4, NULLIF($5, 0), NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING `+grantColumns,
-		g.TenantID, g.OperatorPrincipalID, g.Reason, g.DurationMinutes, g.KeyID, g.KeyPrefix,
-		g.ExpiresAt, g.RequestedAt, g.ImmutableDigest)
+		g.TenantID, g.OperatorPrincipalID, g.Reason, g.DurationMinutes, g.KeyID, g.KeyPrefix, g.Status,
+		g.ExpiresAt, g.RequestedAt, g.ImmutableDigest,
+		g.PendingApprovalBy, g.PendingApprovalReason, g.Approver1, g.Approver2,
+		g.ApprovedByAdmin1At, g.ApprovedByAdmin2At)
 	return scanGrant(row)
 }
 
@@ -150,13 +167,47 @@ func (p *postgresTx) SetGrantStatus(ctx context.Context, tenantID, grantID, stat
 	row := p.db.QueryRowContext(ctx, `
 		UPDATE break_glass_grants
 		SET status = $1,
-		    revoked_by = CASE WHEN $1 = 'revoked' THEN $4 ELSE '' END,
-		    revocation_reason = CASE WHEN $1 = 'revoked' THEN $5 ELSE '' END,
-		    revoked_at = CASE WHEN $1 = 'revoked' THEN now() ELSE revoked_at END
+		    revoked_by = CASE WHEN $1 IN ('revoked','rejected') THEN $4 ELSE '' END,
+		    revocation_reason = CASE WHEN $1 IN ('revoked','rejected') THEN $5 ELSE '' END,
+		    revoked_at = CASE WHEN $1 IN ('revoked','rejected') THEN now() ELSE revoked_at END
 		WHERE tenant_id = $2 AND id = $3
 		RETURNING `+grantColumns,
 		status, tenantID, grantID, revokedBy, revocationReason)
 	return scanGrant(row)
+}
+
+func (p *postgresTx) ApproveStep(ctx context.Context, tenantID, grantID, approver string, adminStep int, at time.Time) (runtime.BreakGlassGrant, error) {
+	var row interface{ Scan(...any) error }
+	switch adminStep {
+	case 1:
+		row = p.db.QueryRowContext(ctx, `
+			UPDATE break_glass_grants
+			SET approver1 = $3, approved_by_admin1_at = $4
+			WHERE tenant_id = $1 AND id = $2
+			RETURNING `+grantColumns, tenantID, grantID, approver, at)
+	case 2:
+		row = p.db.QueryRowContext(ctx, `
+			UPDATE break_glass_grants
+			SET approver2 = $3, approved_by_admin2_at = $4, status = 'active'
+			WHERE tenant_id = $1 AND id = $2
+			RETURNING `+grantColumns, tenantID, grantID, approver, at)
+	default:
+		return runtime.BreakGlassGrant{}, fmt.Errorf("invalid approval step %d", adminStep)
+	}
+	return scanGrant(row)
+}
+
+func (p *postgresTx) BindGrantKey(ctx context.Context, tenantID, grantID string, keyID int64, keyPrefix string) (runtime.BreakGlassGrant, error) {
+	row := p.db.QueryRowContext(ctx, `
+		UPDATE break_glass_grants
+		SET key_id = $3, key_prefix = $4
+		WHERE tenant_id = $1 AND id = $2 AND (key_id IS NULL OR key_id = 0)
+		RETURNING `+grantColumns, tenantID, grantID, keyID, keyPrefix)
+	g, err := scanGrant(row)
+	if err != nil && errors.Is(err, sql.ErrNoRows) {
+		return runtime.BreakGlassGrant{}, fmt.Errorf("%w: grant already has a bound key", runtime.ErrBreakGlassNotPendingApproval)
+	}
+	return g, err
 }
 
 func (p *PostgresStore) GetGrant(ctx context.Context, tenantID, grantID string) (runtime.BreakGlassGrant, error) {

@@ -134,7 +134,7 @@ func TestGovernanceBudgetsHTTP(t *testing.T) {
 	govSetup(t, h.s, false)
 
 	// Upsert a tenant-scope budget capping actions per run at 2.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/budgets", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/governance/budgets", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"scope_type":"tenant","max_actions_per_run":2}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upsert budget: %d %s", rec.Code, rec.Body.String())

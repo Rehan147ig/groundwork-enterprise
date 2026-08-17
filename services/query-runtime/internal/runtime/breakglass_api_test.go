@@ -9,6 +9,7 @@ package runtime_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,46 @@ import (
 	"groundwork/query-runtime/internal/runtime"
 )
 
+// stubNotifier is a NotificationService that always delivers
+// successfully unless failSend is set — used to keep the break-glass
+// lifecycle tests focused on evidence, and to drive notification-failure
+// evidence tests.
+type stubNotifier struct {
+	failSend bool
+}
+
+func (n *stubNotifier) SendBreakGlassRequest(context.Context, string, string, string, string, string, string) error {
+	if n.failSend {
+		return errors.New("stub delivery failure")
+	}
+	return nil
+}
+
+func (n *stubNotifier) SendBreakGlassActivated(context.Context, string, string, string) error {
+	if n.failSend {
+		return errors.New("stub delivery failure")
+	}
+	return nil
+}
+
+func (n *stubNotifier) SendBreakGlassDenied(context.Context, string, string, string, string, string) error {
+	if n.failSend {
+		return errors.New("stub delivery failure")
+	}
+	return nil
+}
+
+func (n *stubNotifier) SendBreakGlassTeams(context.Context, string, string, string, string) error {
+	if n.failSend {
+		return errors.New("stub delivery failure")
+	}
+	return nil
+}
+
+func (n *stubNotifier) AuthorizedAdmin(string, string) bool { return true }
+
+func (n *stubNotifier) VerifySignature(string, string, string) error { return nil }
+
 func newBreakGlassServer(t *testing.T, apiKeys *runtime.MemoryAPIKeyResolver, svc runtime.BreakGlassService) *runtime.Server {
 	t.Helper()
 	backend := runtime.NewMemoryBackend()
@@ -27,6 +68,7 @@ func newBreakGlassServer(t *testing.T, apiKeys *runtime.MemoryAPIKeyResolver, sv
 	if svc != nil {
 		s.SetBreakGlassService(svc)
 	}
+	s.SetNotifier(&stubNotifier{})
 	return s
 }
 
@@ -84,11 +126,11 @@ func TestBreakGlassUnavailableWhenNotWired(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("get: got %d, want 503", rec.Code)
 	}
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":15}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("open: got %d, want 503", rec.Code)
 	}
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/grant-1/revoke", govAdminKey, tokenFor(t, govOwner), `{"reason":"no longer needed"}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/grant-1/revoke", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"no longer needed"}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("revoke: got %d, want 503", rec.Code)
 	}
@@ -120,17 +162,17 @@ func TestBreakGlassOpenValidation(t *testing.T) {
 	_, apiKeys, svc := newBreakGlassHarness(t, 60, adminTenant())
 	s := newBreakGlassServer(t, apiKeys, svc)
 
-	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"duration_minutes":15}`)
+	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"duration_minutes":15}`)
 	if rec.Code != http.StatusBadRequest || govErrorOf(t, rec) != "reason_required" {
 		t.Fatalf("empty reason: got %d %q, want 400 reason_required", rec.Code, rec.Body.String())
 	}
 
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"reason":"incident"}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"incident"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing duration: got %d, want 400", rec.Code)
 	}
 
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"reason":"incident","duration_minutes":61}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"incident","duration_minutes":61}`)
 	if rec.Code != http.StatusBadRequest || govErrorOf(t, rec) != "break_glass_open_failed" {
 		t.Fatalf("over cap: got %d %q, want 400 break_glass_open_failed", rec.Code, rec.Body.String())
 	}
@@ -143,7 +185,7 @@ func TestBreakGlassLifecycleAndRevokeFailsClosed(t *testing.T) {
 	s := newBreakGlassServer(t, apiKeys, svc)
 	_ = tenant
 
-	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, tokenFor(t, govOwner), `{"reason":"prod incident on-e-call","duration_minutes":30}`)
+	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"prod incident on-e-call","duration_minutes":30}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("open: got %d %s, want 201", rec.Code, rec.Body.String())
 	}
@@ -182,7 +224,7 @@ func TestBreakGlassLifecycleAndRevokeFailsClosed(t *testing.T) {
 
 	// Revoke with a mandatory reason; the minted key fails closed on
 	// its next use.
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/"+opened.Grant.ID+"/revoke", govAdminKey, tokenFor(t, govOwner), `{"reason":"incident resolved"}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/"+opened.Grant.ID+"/revoke", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"incident resolved"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: got %d %s, want 200", rec.Code, rec.Body.String())
 	}
@@ -199,7 +241,7 @@ func TestBreakGlassLifecycleAndRevokeFailsClosed(t *testing.T) {
 	}
 
 	// Revoking again fails: the grant is no longer active.
-	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/"+opened.Grant.ID+"/revoke", govAdminKey, tokenFor(t, govOwner), `{"reason":"again"}`)
+	rec = doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/"+opened.Grant.ID+"/revoke", govAdminKey, adminTokenFor(t, govOwner), `{"reason":"again"}`)
 	if rec.Code != http.StatusConflict || govErrorOf(t, rec) != "break_glass_grant_not_active" {
 		t.Fatalf("double revoke: got %d %q, want 409 break_glass_grant_not_active", rec.Code, rec.Body.String())
 	}
@@ -208,7 +250,7 @@ func TestBreakGlassLifecycleAndRevokeFailsClosed(t *testing.T) {
 func TestBreakGlassRevokeRequiresReason(t *testing.T) {
 	_, apiKeys, svc := newBreakGlassHarness(t, 60, adminTenant())
 	s := newBreakGlassServer(t, apiKeys, svc)
-	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/grant-1/revoke", govAdminKey, tokenFor(t, govOwner), `{}`)
+	rec := doBreakGlass(t, s, http.MethodPost, "/v1/security/break-glass/grants/grant-1/revoke", govAdminKey, adminTokenFor(t, govOwner), `{}`)
 	if rec.Code != http.StatusBadRequest || govErrorOf(t, rec) != "reason_required" {
 		t.Fatalf("got %d %q, want 400 reason_required", rec.Code, rec.Body.String())
 	}

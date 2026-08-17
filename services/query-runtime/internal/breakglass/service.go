@@ -43,6 +43,13 @@ func NewService(store Store, keys KeyMinter, maxDuration time.Duration) *Service
 // record cannot be persisted, the key is revoked best-effort so no
 // orphaned access key survives a failed grant. The minted raw key is
 // returned once in the response; it is never persisted anywhere.
+//
+// Four-eyes mode (req.Admin2ID set): the grant is created in
+// pending_approval with approver1 = the opener and pending_approval_by =
+// the named second admin. No API key is minted — a pending grant must
+// not carry a live admin key. The key is minted and returned only when
+// the second admin approves (see Approve), so the raw key reaches
+// exactly the two-admins-approved path.
 func (s *Service) Open(ctx context.Context, tenant runtime.TenantContext, operatorPrincipalID string, req runtime.OpenBreakGlassRequest) (runtime.BreakGlassGrant, string, error) {
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
@@ -67,25 +74,42 @@ func (s *Service) Open(ctx context.Context, tenant runtime.TenantContext, operat
 		TenantID: tenant.TenantID,
 		Region:   tenant.Region,
 	}
-	key, err := s.keys.Create(ctx, keyTenant, runtime.CreateAPIKeyRequest{
-		Name:      "break-glass",
-		Scopes:    []string{"admin"},
-		ExpiresAt: expiresAt,
-	})
-	if err != nil {
-		return runtime.BreakGlassGrant{}, "", err
+	fourEyes := strings.TrimSpace(req.Admin2ID) != ""
+	var keyID int64
+	var keyPrefix, mintedKey string
+	if !fourEyes {
+		key, err := s.keys.Create(ctx, keyTenant, runtime.CreateAPIKeyRequest{
+			Name:      "break-glass",
+			Scopes:    []string{"admin"},
+			ExpiresAt: expiresAt,
+		})
+		if err != nil {
+			return runtime.BreakGlassGrant{}, "", err
+		}
+		keyID, keyPrefix, mintedKey = key.ID, key.KeyPrefix, key.Key
 	}
 
+	status := runtime.BreakGlassStatusActive
+	if fourEyes {
+		status = runtime.BreakGlassStatusPendingApproval
+	}
 	grant := runtime.BreakGlassGrant{
 		TenantID:            tenant.TenantID,
 		OperatorPrincipalID: operatorPrincipalID,
 		Reason:              reason,
 		DurationMinutes:     req.DurationMinutes,
-		KeyID:               key.ID,
-		KeyPrefix:           key.KeyPrefix,
-		Status:              runtime.BreakGlassStatusActive,
+		KeyID:               keyID,
+		KeyPrefix:           keyPrefix,
+		Status:              status,
 		ExpiresAt:           expiresAt,
 		RequestedAt:         now,
+	}
+	if fourEyes {
+		// Admin 1's opening is the first of the two approvals; the
+		// grant waits for the named second admin.
+		grant.PendingApprovalBy = strings.TrimSpace(req.Admin2ID)
+		grant.PendingApprovalReason = reason
+		grant.Approver1 = operatorPrincipalID
 	}
 	grant.ImmutableDigest = ComputeGrantDigest(grant)
 
@@ -96,12 +120,12 @@ func (s *Service) Open(ctx context.Context, tenant runtime.TenantContext, operat
 		ActorPrincipalID: operatorPrincipalID,
 		Reason:           reason,
 		DurationMinutes:  req.DurationMinutes,
-		KeyID:            key.ID,
+		KeyID:            keyID,
 		ExpiresAt:        expiresAt,
 		CreatedAt:        now.Truncate(time.Microsecond),
 	}
 
-	err = s.store.Transact(ctx, "breakglass:"+tenant.TenantID, func(tx TxStore) error {
+	err := s.store.Transact(ctx, "breakglass:"+tenant.TenantID, func(tx TxStore) error {
 		created, err := tx.CreateGrant(ctx, grant)
 		if err != nil {
 			return err
@@ -114,10 +138,12 @@ func (s *Service) Open(ctx context.Context, tenant runtime.TenantContext, operat
 	if err != nil {
 		// The key is minted but the grant never persisted: revoke it so
 		// the failed grant leaves no live admin key behind.
-		_, _ = s.keys.Revoke(ctx, keyTenant, key.ID)
+		if !fourEyes {
+			_, _ = s.keys.Revoke(ctx, keyTenant, keyID)
+		}
 		return runtime.BreakGlassGrant{}, "", err
 	}
-	return grant, key.Key, nil
+	return grant, mintedKey, nil
 }
 
 // List returns the tenant's grants, lazily flipping grants that have
@@ -130,7 +156,7 @@ func (s *Service) List(ctx context.Context, tenantID string) ([]runtime.BreakGla
 	now := s.now().UTC()
 	expired := false
 	for i := range grants {
-		if grants[i].Status == runtime.BreakGlassStatusActive && !grants[i].ExpiresAt.After(now) {
+		if (grants[i].Status == runtime.BreakGlassStatusActive || grants[i].Status == runtime.BreakGlassStatusPendingApproval) && !grants[i].ExpiresAt.After(now) {
 			if err := s.expire(ctx, tenantID, grants[i]); err != nil {
 				return nil, err
 			}
@@ -150,7 +176,7 @@ func (s *Service) Get(ctx context.Context, tenantID, grantID string) (runtime.Br
 	if err != nil {
 		return runtime.BreakGlassGrant{}, nil, err
 	}
-	if grant.Status == runtime.BreakGlassStatusActive && !grant.ExpiresAt.After(s.now().UTC()) {
+	if (grant.Status == runtime.BreakGlassStatusActive || grant.Status == runtime.BreakGlassStatusPendingApproval) && !grant.ExpiresAt.After(s.now().UTC()) {
 		if err := s.expire(ctx, tenantID, grant); err != nil {
 			return runtime.BreakGlassGrant{}, nil, err
 		}
@@ -211,6 +237,171 @@ func (s *Service) Revoke(ctx context.Context, tenant runtime.TenantContext, gran
 	return grant, nil
 }
 
+// Approve is the second admin's four-eyes approval. The actor must be
+// exactly the admin the grant is waiting on (server-side role check —
+// the HTTP surface and interactive actions never trust a self-declared
+// role). The key is minted first; if the activation cannot be
+// persisted, the key is revoked best-effort. The raw key is returned
+// once, only to the approving admin.
+func (s *Service) Approve(ctx context.Context, tenant runtime.TenantContext, grantID, actor string) (runtime.BreakGlassGrant, string, error) {
+	if strings.TrimSpace(actor) == "" {
+		return runtime.BreakGlassGrant{}, "", runtime.ErrInvalidRequest
+	}
+	if s.keys == nil {
+		return runtime.BreakGlassGrant{}, "", runtime.ErrBreakGlassUnavailable
+	}
+
+	var pending runtime.BreakGlassGrant
+	err := s.store.Transact(ctx, "breakglass:"+tenant.TenantID, func(tx TxStore) error {
+		current, err := tx.GetGrant(ctx, tenant.TenantID, grantID)
+		if err != nil {
+			return err
+		}
+		if current.Status != runtime.BreakGlassStatusPendingApproval {
+			return runtime.ErrBreakGlassNotPendingApproval
+		}
+		if current.PendingApprovalBy != actor {
+			return runtime.ErrBreakGlassForbidden
+		}
+		pending = current
+		return nil
+	})
+	if err != nil {
+		return runtime.BreakGlassGrant{}, "", err
+	}
+
+	key, err := s.keys.Create(ctx, runtime.TenantContext{TenantID: tenant.TenantID, Region: tenant.Region}, runtime.CreateAPIKeyRequest{
+		Name:      "break-glass",
+		Scopes:    []string{"admin"},
+		ExpiresAt: pending.ExpiresAt,
+	})
+	if err != nil {
+		return runtime.BreakGlassGrant{}, "", err
+	}
+
+	now := s.now().UTC().Truncate(time.Microsecond)
+	var activated runtime.BreakGlassGrant
+	err = s.store.Transact(ctx, "breakglass:"+tenant.TenantID, func(tx TxStore) error {
+		current, err := tx.GetGrant(ctx, tenant.TenantID, grantID)
+		if err != nil {
+			return err
+		}
+		if current.Status != runtime.BreakGlassStatusPendingApproval {
+			return runtime.ErrBreakGlassNotPendingApproval
+		}
+		if current.PendingApprovalBy != actor {
+			return runtime.ErrBreakGlassForbidden
+		}
+		activated, err = tx.ApproveStep(ctx, tenant.TenantID, grantID, actor, 2, now)
+		if err != nil {
+			return err
+		}
+		activated, err = tx.BindGrantKey(ctx, tenant.TenantID, grantID, key.ID, key.KeyPrefix)
+		if err != nil {
+			return err
+		}
+		_, err = tx.AppendEvent(ctx, runtime.BreakGlassEvent{
+			TenantID:         tenant.TenantID,
+			GrantID:          grantID,
+			EventType:        runtime.BreakGlassEventApprovedByAdmin2,
+			ActorPrincipalID: actor,
+			Reason:           "second admin approval",
+			DurationMinutes:  activated.DurationMinutes,
+			KeyID:            key.ID,
+			ExpiresAt:        activated.ExpiresAt,
+			CreatedAt:        now,
+		})
+		return err
+	})
+	if err != nil {
+		// The key is minted but the activation never persisted: revoke
+		// it so a failed approval leaves no live admin key behind.
+		_, _ = s.keys.Revoke(ctx, runtime.TenantContext{TenantID: tenant.TenantID, Region: tenant.Region}, key.ID)
+		return runtime.BreakGlassGrant{}, "", err
+	}
+	return activated, key.Key, nil
+}
+
+// Reject terminates a pending grant. The actor must be exactly the
+// admin the grant is waiting on; the reason is mandatory and recorded
+// as hash-chained 'rejected' evidence.
+func (s *Service) Reject(ctx context.Context, tenant runtime.TenantContext, grantID, actor string, req runtime.RevokeBreakGlassRequest) (runtime.BreakGlassGrant, error) {
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		return runtime.BreakGlassGrant{}, fmt.Errorf("%w: reason required for break-glass rejection", runtime.ErrInvalidRequest)
+	}
+	if strings.TrimSpace(actor) == "" {
+		return runtime.BreakGlassGrant{}, runtime.ErrInvalidRequest
+	}
+
+	var grant runtime.BreakGlassGrant
+	err := s.store.Transact(ctx, "breakglass:"+tenant.TenantID, func(tx TxStore) error {
+		current, err := tx.GetGrant(ctx, tenant.TenantID, grantID)
+		if err != nil {
+			return err
+		}
+		if current.Status != runtime.BreakGlassStatusPendingApproval {
+			return runtime.ErrBreakGlassNotPendingApproval
+		}
+		if current.PendingApprovalBy != actor {
+			return runtime.ErrBreakGlassForbidden
+		}
+		rejected, err := tx.SetGrantStatus(ctx, tenant.TenantID, grantID, runtime.BreakGlassStatusRejected, actor, reason)
+		if err != nil {
+			return err
+		}
+		grant = rejected
+		_, err = tx.AppendEvent(ctx, runtime.BreakGlassEvent{
+			TenantID:         tenant.TenantID,
+			GrantID:          grantID,
+			EventType:        runtime.BreakGlassEventRejected,
+			ActorPrincipalID: actor,
+			Reason:           reason,
+			DurationMinutes:  rejected.DurationMinutes,
+			KeyID:            rejected.KeyID,
+			ExpiresAt:        rejected.ExpiresAt,
+			CreatedAt:        s.now().UTC().Truncate(time.Microsecond),
+		})
+		return err
+	})
+	if err != nil {
+		return runtime.BreakGlassGrant{}, err
+	}
+	// A pending grant has no key; this is defensive in case a rejected
+	// grant ever carried one.
+	_, _ = s.keys.Revoke(ctx, runtime.TenantContext{TenantID: tenant.TenantID, Region: tenant.Region}, grant.KeyID)
+	return grant, nil
+}
+
+// RecordNotificationFailure appends 'notification_failed' evidence to a
+// grant's chain so a failed delivery (Slack/Teams) is never silent —
+// the grant's lifecycle remains fully accountable even when the alert
+// channel itself failed. Best-effort: errors are returned for the
+// caller to log; the grant operation itself is never rolled back.
+func (s *Service) RecordNotificationFailure(ctx context.Context, tenantID, grantID, channel, detail string) error {
+	if s.store == nil {
+		return runtime.ErrBreakGlassUnavailable
+	}
+	return s.store.Transact(ctx, "breakglass:"+tenantID, func(tx TxStore) error {
+		grant, err := tx.GetGrant(ctx, tenantID, grantID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.AppendEvent(ctx, runtime.BreakGlassEvent{
+			TenantID:         tenantID,
+			GrantID:          grantID,
+			EventType:        runtime.BreakGlassEventNotificationFailed,
+			ActorPrincipalID: "notification-delivery",
+			Reason:           channel + ": " + detail,
+			DurationMinutes:  grant.DurationMinutes,
+			KeyID:            grant.KeyID,
+			ExpiresAt:        grant.ExpiresAt,
+			CreatedAt:        s.now().UTC().Truncate(time.Microsecond),
+		})
+		return err
+	})
+}
+
 // expire flips one active grant to 'expired' and appends 'expired'
 // evidence atomically.
 func (s *Service) expire(ctx context.Context, tenantID string, grant runtime.BreakGlassGrant) error {
@@ -219,7 +410,7 @@ func (s *Service) expire(ctx context.Context, tenantID string, grant runtime.Bre
 		if err != nil {
 			return err
 		}
-		if current.Status != runtime.BreakGlassStatusActive {
+		if current.Status != runtime.BreakGlassStatusActive && current.Status != runtime.BreakGlassStatusPendingApproval {
 			return nil // already transitioned by a concurrent call
 		}
 		if _, err := tx.SetGrantStatus(ctx, tenantID, grant.ID, runtime.BreakGlassStatusExpired, "", ""); err != nil {

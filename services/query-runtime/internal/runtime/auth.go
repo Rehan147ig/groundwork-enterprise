@@ -428,12 +428,43 @@ func BuildAPIKeyResolver(ctx context.Context, cfg Config) (APIKeyResolver, func(
 	return resolver, resolver.Close, nil
 }
 
-func extractAPIKey(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("Authorization")); value != "" {
-		prefix := "Bearer "
-		if strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
-			return strings.TrimSpace(value[len(prefix):])
+// bearerToken returns the value of an "Authorization: Bearer <token>"
+// header, or "" when absent or not bearer-shaped.
+func bearerToken(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	if value == "" || !strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
+		return ""
+	}
+	return strings.TrimSpace(value[len(prefix):])
+}
+
+// looksLikeJWT reports whether a credential is shaped as a signed JWT
+// (three dot-separated, non-empty segments). Groundwork API keys are
+// generated as gw_live_<hex>_<hex> and never contain dots, so a
+// JWT-shaped value in Authorization: Bearer is unambiguously a user
+// identity assertion — it can never collide with an API key.
+func looksLikeJWT(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return false
 		}
+	}
+	return true
+}
+
+func extractAPIKey(r *http.Request) string {
+	// Authorization: Bearer is the API-key channel ONLY when the value
+	// is not JWT-shaped. A signed JWT there is a user identity
+	// assertion (see extractUserAssertion) — accepting it as an API key
+	// would both misroute the request and let clients shadow the
+	// explicit key header.
+	if bearer := bearerToken(r); bearer != "" && !looksLikeJWT(bearer) {
+		return bearer
 	}
 	return strings.TrimSpace(r.Header.Get("X-Groundwork-API-Key"))
 }

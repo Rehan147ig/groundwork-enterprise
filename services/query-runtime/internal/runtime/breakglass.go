@@ -13,26 +13,42 @@ import (
 // closed at the API-key auth layer on the next request.
 
 const (
-	BreakGlassStatusActive  = "active"
-	BreakGlassStatusExpired = "expired"
-	BreakGlassStatusRevoked = "revoked"
+	BreakGlassStatusActive          = "active"
+	BreakGlassStatusExpired         = "expired"
+	BreakGlassStatusRevoked         = "revoked"
+	BreakGlassStatusPendingApproval = "pending_approval"
+	BreakGlassStatusRejected        = "rejected"
 
-	BreakGlassEventOpened  = "opened"
-	BreakGlassEventExpired = "expired"
-	BreakGlassEventRevoked = "revoked"
+	BreakGlassEventOpened             = "opened"
+	BreakGlassEventApprovedByAdmin1   = "approved_by_admin1"
+	BreakGlassEventApprovedByAdmin2   = "approved_by_admin2"
+	BreakGlassEventExpired            = "expired"
+	BreakGlassEventRevoked            = "revoked"
+	BreakGlassEventRejected           = "rejected"
+	BreakGlassEventNotificationFailed = "notification_failed"
 )
 
-var (
-	// ErrBreakGlassNotFound means the grant id does not exist for the
-	// tenant.
-	ErrBreakGlassNotFound = errors.New("break glass grant not found")
-	// ErrBreakGlassUnavailable means the break-glass service is not
-	// wired (no durable store or key manager available).
-	ErrBreakGlassUnavailable = errors.New("break glass service unavailable")
-	// ErrBreakGlassNotActive means a transition was attempted on a
-	// grant that is no longer active (revoked or expired).
-	ErrBreakGlassNotActive = errors.New("break glass grant is not active")
-)
+// ErrBreakGlassNotFound means the grant id does not exist for the
+// tenant.
+var ErrBreakGlassNotFound = errors.New("break glass grant not found")
+
+// ErrBreakGlassUnavailable means the break-glass service is not
+// wired (no durable store or key manager available).
+var ErrBreakGlassUnavailable = errors.New("break glass service unavailable")
+
+// ErrBreakGlassNotActive means a transition was attempted on a
+// grant that is no longer active (revoked or expired).
+var ErrBreakGlassNotActive = errors.New("break glass grant is not active")
+
+// ErrBreakGlassNotPendingApproval means a four-eyes transition
+// (approve/reject) was attempted on a grant that is not waiting for
+// approval.
+var ErrBreakGlassNotPendingApproval = errors.New("break glass grant is not pending approval")
+
+// ErrBreakGlassForbidden means the actor is not the admin the grant is
+// waiting on (server-side role check; interactive actions and the HTTP
+// surface never trust the caller's self-declared role).
+var ErrBreakGlassForbidden = errors.New("break glass action forbidden for actor")
 
 // BreakGlassGrant is one time-bounded emergency admin grant. It binds an
 // operator principal, a mandatory reason, a duration, and the minted
@@ -56,11 +72,18 @@ type BreakGlassGrant struct {
 	RevocationReason    string    `json:"revocation_reason,omitempty"`
 	ImmutableDigest     string    `json:"immutable_digest"`
 	CreatedAt           time.Time `json:"created_at"`
+	// 2-person approval flow (four-eyes principle).
+	PendingApprovalBy     string    `json:"pending_approval_by,omitempty"` // admin ID waiting for second approval
+	ApprovedByAdmin1At    time.Time `json:"approved_by_admin1_at,omitempty"`
+	ApprovedByAdmin2At    time.Time `json:"approved_by_admin2_at,omitempty"`
+	Approver1             string    `json:"approver1,omitempty"` // first admin who approved
+	Approver2             string    `json:"approver2,omitempty"` // second admin who approved
+	PendingApprovalReason string    `json:"pending_approval_reason,omitempty"`
 }
 
 // BreakGlassEvent is immutable hash-chained evidence of one grant
-// lifecycle transition (opened / expired / revoked). Events chain per
-// tenant (each row digests its predecessor).
+// lifecycle transition (opened / approved_by_admin1 / approved_by_admin2 /
+// expired / revoked). Events chain per tenant (each row digests its predecessor).
 type BreakGlassEvent struct {
 	ID               string    `json:"id"`
 	TenantID         string    `json:"tenant_id"`
@@ -81,6 +104,14 @@ type BreakGlassEvent struct {
 type OpenBreakGlassRequest struct {
 	Reason          string `json:"reason"`
 	DurationMinutes int    `json:"duration_minutes"`
+	// Admin2ID is the second admin who must approve the grant (four-eyes principle).
+	Admin2ID string `json:"admin2_id,omitempty"`
+}
+
+// ApproveBreakGlassRequest is sent by an admin to approve a pending grant.
+type ApproveBreakGlassRequest struct {
+	AdminID      string `json:"admin_id"`
+	ApprovalType string `json:"approval_type"` // "admin1" or "admin2"
 }
 
 // RevokeBreakGlassRequest terminates a grant early. Reason is mandatory:
@@ -105,7 +136,21 @@ type BreakGlassService interface {
 	List(ctx context.Context, tenantID string) ([]BreakGlassGrant, error)
 	// Get returns one grant with its event chain, lazily expiring it.
 	Get(ctx context.Context, tenantID, grantID string) (BreakGlassGrant, []BreakGlassEvent, error)
+	// Approve is the second admin's four-eyes approval of a pending
+	// grant: it mints the admin-scoped API key (returned once, never
+	// persisted), flips the grant to active, and appends
+	// 'approved_by_admin2' evidence. The actor must be exactly the
+	// admin the grant is waiting on.
+	Approve(ctx context.Context, tenant TenantContext, grantID, actor string) (BreakGlassGrant, string, error)
+	// Reject terminates a pending grant with mandatory reason and
+	// hash-chained 'rejected' evidence. The actor must be exactly the
+	// admin the grant is waiting on.
+	Reject(ctx context.Context, tenant TenantContext, grantID, actor string, req RevokeBreakGlassRequest) (BreakGlassGrant, error)
 	// Revoke terminates an active grant early (revoking its API key)
 	// with mandatory reason and hash-chained 'revoked' evidence.
 	Revoke(ctx context.Context, tenant TenantContext, grantID, actor string, req RevokeBreakGlassRequest) (BreakGlassGrant, error)
+	// RecordNotificationFailure appends 'notification_failed' evidence
+	// so a failed delivery alert is never silent. Best-effort: the
+	// caller logs the error.
+	RecordNotificationFailure(ctx context.Context, tenantID, grantID, channel, detail string) error
 }

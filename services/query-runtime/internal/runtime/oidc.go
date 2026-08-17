@@ -111,6 +111,13 @@ type OIDCVerifier struct {
 // startup on failure) and returns a ready verifier.
 func NewOIDCVerifier(cfg OIDCConfig) (*OIDCVerifier, error) {
 	cfg = normalizeOIDCConfig(cfg)
+	// Fail closed: "sub" is the per-user subject identifier, never a
+	// tenant identifier. Two Okta orgs (or any two providers) can issue
+	// the same sub for different users; binding a tenant to sub would
+	// let a foreign user land in this tenant.
+	if strings.EqualFold(cfg.TenantClaim, "sub") {
+		return nil, fmt.Errorf("tenant claim must not be %q: sub is the per-user subject, not a tenant identifier; configure a dedicated tenant claim (e.g. \"tid\" or a custom mapped claim)", "sub")
+	}
 	v := &OIDCVerifier{
 		cfg:    cfg,
 		now:    time.Now,
@@ -526,6 +533,27 @@ func BuildOIDCVerifierFromEnv() (*OIDCVerifier, error) {
 	}
 	if err := urlParseCheck(cfg.Issuer); err != nil {
 		return nil, fmt.Errorf("GROUNDWORK_OIDC_ISSUER is not a valid URL: %w", err)
+	}
+	// Audience values must be syntactically valid client/app identifiers —
+	// an empty or malformed audience silently widens acceptance.
+	for _, a := range cfg.Audiences {
+		if strings.TrimSpace(a) == "" {
+			return nil, errors.New("GROUNDWORK_OIDC_AUDIENCE contains an empty value")
+		}
+		if len(a) > 1024 {
+			return nil, errors.New("GROUNDWORK_OIDC_AUDIENCE value exceeds 1024 characters")
+		}
+	}
+	// Tenant allow-list without an explicit tenant claim would silently
+	// map the default claim; require the mapping to be explicit so a
+	// deployment cannot accidentally gate on the wrong claim.
+	if len(cfg.TenantAllowlist) > 0 && strings.TrimSpace(os.Getenv("GROUNDWORK_OIDC_TENANT_CLAIM")) == "" {
+		return nil, errors.New("GROUNDWORK_OIDC_TENANT_ALLOWLIST set without GROUNDWORK_OIDC_TENANT_CLAIM: tenant mapping must be explicit when allow-listing tenant values")
+	}
+	// Admin-role mapping without an explicit roles claim would silently
+	// default to the "roles" claim; require explicitness the same way.
+	if len(cfg.AdminRoles) > 0 && strings.TrimSpace(os.Getenv("GROUNDWORK_OIDC_ADMIN_ROLES_CLAIM")) == "" {
+		return nil, errors.New("GROUNDWORK_OIDC_ADMIN_ROLES set without GROUNDWORK_OIDC_ADMIN_ROLES_CLAIM: the roles claim must be explicit when mapping admin roles")
 	}
 	return NewOIDCVerifier(cfg)
 }

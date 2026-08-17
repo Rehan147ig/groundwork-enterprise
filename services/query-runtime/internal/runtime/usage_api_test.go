@@ -112,7 +112,7 @@ func TestUsageSnapshotShapeAndLimitsLifecycle(t *testing.T) {
 
 	// Upsert limits (verified identity + Idempotency-Key via doUsage).
 	body := `{"limits":[{"metric":"agents","period":"monthly","limit":5}]}`
-	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, tokenFor(t, govOwner), body)
+	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, adminTokenFor(t, govOwner), body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("limits upsert: %d %s", rec.Code, rec.Body.String())
 	}
@@ -143,7 +143,7 @@ func TestUsageLimitsRequireIdempotencyAndIdentity(t *testing.T) {
 	s := newUsageServer(t, usage.NewService(usage.NewMemoryStore()), []string{"admin"})
 
 	// Missing Idempotency-Key fails closed even with a valid identity.
-	req := govRequest(http.MethodPut, "/v1/usage/limits", govAdminKey, tokenFor(t, govOwner), "", `{"limits":[]}`)
+	req := govRequest(http.MethodPut, "/v1/usage/limits", govAdminKey, adminTokenFor(t, govOwner), "", `{"limits":[]}`)
 	rec := httptest.NewRecorder()
 	s.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -157,7 +157,7 @@ func TestUsageLimitsRequireIdempotencyAndIdentity(t *testing.T) {
 	}
 
 	// Invalid period is rejected with 400.
-	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, tokenFor(t, govOwner), `{"limits":[{"metric":"agents","period":"weekly","limit":5}]}`)
+	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, adminTokenFor(t, govOwner), `{"limits":[{"metric":"agents","period":"weekly","limit":5}]}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid period, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -179,7 +179,7 @@ func TestUsageAgentsQuotaFailsClosed(t *testing.T) {
 	}
 
 	// Lock the quota at the current count: further creates must fail.
-	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, tokenFor(t, govOwner), `{"limits":[{"metric":"agents","period":"monthly","limit":1}]}`)
+	rec = doUsage(t, s, http.MethodPut, "/v1/usage/limits", govAdminKey, adminTokenFor(t, govOwner), `{"limits":[{"metric":"agents","period":"monthly","limit":1}]}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("set limit: %d %s", rec.Code, rec.Body.String())
 	}

@@ -81,7 +81,7 @@ func TestTenantUnavailableWhenNotWired(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s (no identity): want 401, got %d (%s)", c.method, c.path, rec.Code, rec.Body.String())
 		}
-		rec = doGov(t, s, c.method, c.path, govAdminKey, tokenFor(t, govOwner), "", `{"reason":"r","tenant_id":"acme","region":"uk"}`)
+		rec = doGov(t, s, c.method, c.path, govAdminKey, adminTokenFor(t, govOwner), "", `{"reason":"r","tenant_id":"acme","region":"uk"}`)
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s %s (verified): want 503, got %d (%s)", c.method, c.path, rec.Code, rec.Body.String())
 		}
@@ -129,7 +129,7 @@ func TestTenantProvisionLifecycle(t *testing.T) {
 	h := newTenantHarness(t)
 
 	// Provision with an initial admin key.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"tenant_id":"contoso","region":"uk","reason":"new customer","mint_admin_key":true}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("provision: %d %s", rec.Code, rec.Body.String())
@@ -191,7 +191,7 @@ func TestTenantDisableFailsClosedAtAuth(t *testing.T) {
 	}
 	tenantKey := h.mintTenantKey(t, "contoso", "uk")
 
-	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/disable", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/disable", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"reason":"suspected compromise"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disable: %d %s", rec.Code, rec.Body.String())
@@ -205,13 +205,13 @@ func TestTenantDisableFailsClosedAtAuth(t *testing.T) {
 	}
 
 	// Disable requires a reason.
-	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/disable", govAdminKey, tokenFor(t, govOwner), "", `{}`)
+	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/disable", govAdminKey, adminTokenFor(t, govOwner), "", `{}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("disable without reason: want 400, got %d", rec.Code)
 	}
 
 	// Enable restores access.
-	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/enable", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/enable", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"reason":"investigation cleared"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("enable: %d %s", rec.Code, rec.Body.String())
@@ -230,7 +230,7 @@ func TestTenantDeprovisionIsNonDestructiveAndReProvisionable(t *testing.T) {
 		t.Fatalf("Provision: %v", err)
 	}
 
-	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/deprovision", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/deprovision", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"reason":"contract ended"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deprovision: %d %s", rec.Code, rec.Body.String())
@@ -254,7 +254,7 @@ func TestTenantDeprovisionIsNonDestructiveAndReProvisionable(t *testing.T) {
 	}
 
 	// Re-provision reactivates; region may change.
-	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, tokenFor(t, govOwner), "",
+	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"tenant_id":"contoso","region":"eu","reason":"re-homed"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("re-provision: %d %s", rec.Code, rec.Body.String())
@@ -276,7 +276,7 @@ func TestTenantProvisionValidationAndConflicts(t *testing.T) {
 		{"missing reason", `{"tenant_id":"acme","region":"uk"}`},
 	}
 	for _, c := range cases {
-		rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, tokenFor(t, govOwner), "", c.body)
+		rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, adminTokenFor(t, govOwner), "", c.body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: want 400, got %d (%s)", c.name, rec.Code, rec.Body.String())
 		}
@@ -289,14 +289,14 @@ func TestTenantProvisionValidationAndConflicts(t *testing.T) {
 	}
 
 	// Region conflict on an active tenant.
-	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, tokenFor(t, govOwner), "",
+	rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants", govAdminKey, adminTokenFor(t, govOwner), "",
 		`{"tenant_id":"acme","region":"eu","reason":"move"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("region conflict: want 409, got %d (%s)", rec.Code, rec.Body.String())
 	}
 
 	// Unknown tenant transitions 404.
-	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/ghost/disable", govAdminKey, tokenFor(t, govOwner), "", `{"reason":"r"}`)
+	rec = doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/ghost/disable", govAdminKey, adminTokenFor(t, govOwner), "", `{"reason":"r"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown tenant disable: want 404, got %d", rec.Code)
 	}
@@ -314,7 +314,7 @@ func TestTenantEventsChainOverHTTP(t *testing.T) {
 		t.Fatalf("Provision: %v", err)
 	}
 	for _, path := range []string{"disable", "enable", "deprovision"} {
-		rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/"+path, govAdminKey, tokenFor(t, govOwner), "",
+		rec := doGov(t, h.s, http.MethodPost, "/v1/admin/tenants/contoso/"+path, govAdminKey, adminTokenFor(t, govOwner), "",
 			`{"reason":"r"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())

@@ -1,8 +1,10 @@
 package policy
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -59,6 +61,17 @@ type PolicyCache struct {
 // NewPolicyCache builds an L1 decision cache.
 func NewPolicyCache(cfg CacheConfig) *PolicyCache {
 	return &PolicyCache{cfg: cfg, now: time.Now, entries: map[string]cacheEntry{}}
+}
+
+// Ping reports the L1 cache's runtime health for /readyz. A nil or
+// zero-value cache (built without NewPolicyCache) cannot serve cached
+// decisions, which means the L1 fast path is silently bypassed; the
+// probe fails so the pod is de-rotated instead of serving degraded.
+func (c *PolicyCache) Ping(_ context.Context) error {
+	if c == nil || c.entries == nil {
+		return errors.New("policy cache not initialized")
+	}
+	return nil
 }
 
 // Key is the cache key: sha256 over (tenant, user, region, doc, scope,

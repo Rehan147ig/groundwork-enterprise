@@ -103,7 +103,7 @@ func newBundleServer(t *testing.T, src runtime.SupportBundleSource) *runtime.Ser
 
 func TestSupportBundleUnavailableWhenUnwired(t *testing.T) {
 	s := newBundleServer(t, nil)
-	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, tokenFor(t, govOwner), "", "")
+	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, adminTokenFor(t, govOwner), "", "")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -126,7 +126,7 @@ func TestSupportBundleScopeGated(t *testing.T) {
 		TenantID: govTenant, Region: govRegion, KeyName: "query-only", Scopes: []string{"query"},
 	}, false, &recordingExecutor{})
 	s.SetSupportBundleSource(&fakeBundleSource{})
-	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, tokenFor(t, govOwner), "", "")
+	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, adminTokenFor(t, govOwner), "", "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -139,7 +139,7 @@ func TestSupportBundleStreamsZip(t *testing.T) {
 	}})
 	s.AddReadinessProbe(runtime.ReadinessProbe{Name: "postgres", Check: func(context.Context) error { return nil }})
 
-	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, tokenFor(t, govOwner), "", "")
+	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, adminTokenFor(t, govOwner), "", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -207,7 +207,7 @@ func TestSupportBundleStreamsZip(t *testing.T) {
 
 func TestSupportBundleFailsWhenSourceErrors(t *testing.T) {
 	s := newBundleServer(t, &fakeBundleSource{err: context.DeadlineExceeded})
-	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, tokenFor(t, govOwner), "", "")
+	rec := doGov(t, s, http.MethodGet, "/v1/security/support-bundle", govAdminKey, adminTokenFor(t, govOwner), "", "")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 	}
