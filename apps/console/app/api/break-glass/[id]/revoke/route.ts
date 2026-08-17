@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mintConsoleAssertion } from "@/lib/jwt";
+import { runtimeUserToken } from "@/lib/auth";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // Break-glass early revocation — POST /v1/security/break-glass/grants/{id}/revoke.
 // Requires a verified operator identity (same rules as opening a grant)
@@ -10,6 +12,8 @@ const RUNTIME_URL = process.env.QUERY_RUNTIME_URL ?? "http://localhost:8080";
 const API_KEY = process.env.GROUNDWORK_API_KEY ?? "";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const denied = await requireConsolePermission("break-glass");
+  if (denied) return denied;
   const { id } = await params;
   if (!API_KEY) {
     return NextResponse.json(
@@ -29,12 +33,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     );
   }
 
-  const token = await mintConsoleAssertion("console-operator");
-  if (!token) {
+  const idToken = await runtimeUserToken();
+  let operatorToken: string | null = null;
+  if (idToken) {
+    operatorToken = idToken; // runtime JWKS-verifies the IdP id_token itself
+  } else {
+    operatorToken = await mintConsoleAssertion("console-operator");
+  }
+  if (!operatorToken) {
     return NextResponse.json(
       {
         error:
-          "Revoking a break-glass grant requires a signed operator identity. Set GROUNDWORK_JWT_RS_PRIVATE_KEY (production) or GROUNDWORK_JWT_HS_SECRET (local).",
+          "Revoking a break-glass grant requires a verified operator identity. Configure OIDC_ISSUER/OIDC_CLIENT_ID/OIDC_CLIENT_SECRET (enterprise) or GROUNDWORK_JWT_RS_PRIVATE_KEY / GROUNDWORK_JWT_HS_SECRET (assertion minting).",
       },
       { status: 503 },
     );
@@ -47,7 +57,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       headers: {
         "Content-Type": "application/json",
         "X-Groundwork-API-Key": API_KEY,
-        "X-Groundwork-User-Assertion": token,
+        ...(idToken
+          ? { Authorization: `Bearer ${idToken}` }
+          : { "X-Groundwork-User-Assertion": operatorToken }),
       },
       body: JSON.stringify({ reason }),
       cache: "no-store",

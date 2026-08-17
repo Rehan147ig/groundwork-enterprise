@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { Activity, DatabaseZap, LockKeyhole, ShieldCheck } from "lucide-react";
-import { Sidebar } from "./Sidebar";
 
 const metrics = [
   ["p95 latency", "184ms", "Under 250ms runtime budget", "good"],
@@ -24,7 +23,6 @@ const traces = [
 export default function ConsoleHome() {
   return (
     <div className="shell">
-      <Sidebar />
       <main className="main">
         <div className="page-head">
           <div>

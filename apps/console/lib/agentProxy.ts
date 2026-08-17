@@ -1,10 +1,16 @@
 import { NextResponse } from "next/server";
 import { mintConsoleAssertion } from "@/lib/jwt";
+import { runtimeUserToken } from "@/lib/auth";
 
 // Shared plumbing for the console's Agent Registry surface. Mirrors the
 // /api/query proxy: the tenant API key and (for mutations) a short-lived
 // console-admin assertion are minted server-side so neither the key nor
 // the minting secret ever reaches the browser.
+//
+// Enterprise auth: when the caller holds a verified OIDC session, the
+// IdP id_token is forwarded as `Authorization: Bearer <id_token>` — the
+// runtime verifies it against the IdP's JWKS and that identity binds the
+// mutation to the real user (console-admin minting is skipped).
 
 export type Agent = {
   id: string;
@@ -62,16 +68,23 @@ export function agentRuntimeEnv() {
   };
 }
 
-// agentHeaders returns the headers a /v1/agents call needs. A
-// console-admin assertion is minted with RS256 when configured, else
-// HS256 (local/dev). Without any signing key the header is omitted and
-// the runtime must run with ALLOW_DEMO_IDENTITY=true — the same
-// fail-closed contract as /api/query.
+// agentHeaders returns the headers a /v1/agents call needs. A verified
+// OIDC session forwards the user's id_token as Authorization: Bearer
+// (the runtime verifies it against the IdP JWKS). Without a session, a
+// console-admin assertion is minted (RS256 when configured, else HS256
+// for local/dev). With neither, the header is omitted and the runtime
+// must run with ALLOW_DEMO_IDENTITY=true — the same fail-closed contract
+// as /api/query.
 export async function agentHeaders(_secret: string, apiKey: string): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Groundwork-API-Key": apiKey,
   };
+  const idToken = await runtimeUserToken();
+  if (idToken) {
+    headers["Authorization"] = `Bearer ${idToken}`;
+    return headers;
+  }
   const token = await mintConsoleAssertion("console-admin");
   if (token) {
     headers["X-Groundwork-User-Assertion"] = token;

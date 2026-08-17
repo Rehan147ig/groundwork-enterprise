@@ -25,6 +25,9 @@ export type ConsoleQueryRequest = {
   api_key?: string;
   source_scopes?: string[];
   idk_threshold?: number;
+  // Viewer-safe query simulation marker: requests with simulate=true are
+  // served under the "query-simulation" permission instead of "query".
+  simulate?: boolean;
 };
 
 export type Citation = {

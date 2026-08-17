@@ -70,6 +70,54 @@ textarea {
   color: white;
 }
 
+.sidebar-user {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 10px;
+  margin-top: 28px;
+  padding-top: 16px;
+}
+
+.sidebar-user-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sidebar-user-identity strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-identity .muted,
+.sidebar-user-identity span {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-action {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 0;
+  border-radius: 8px;
+  color: white;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.sidebar-user-action:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .main {
   padding: 28px;
 }
@@ -291,6 +339,42 @@ code {
   font-weight: 800;
   min-height: 42px;
   padding: 0 14px;
+}
+
+.button:disabled {
+  background: #94a3b8;
+  border-color: #94a3b8;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ */
+/* RBAC additions: disabled nav items (grayed out with tooltip) and    */
+/* the session role badge in the sidebar user block.                   */
+/* ------------------------------------------------------------------ */
+
+.nav .nav-disabled {
+  border-radius: 8px;
+  color: rgba(185, 198, 216, 0.4);
+  cursor: not-allowed;
+  font-weight: 700;
+  padding: 12px;
+  user-select: none;
+}
+
+.role-badge {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: #b9c6d8;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  gap: 5px;
+  justify-self: start;
+  letter-spacing: 0.4px;
+  margin-top: 2px;
+  padding: 3px 8px;
+  text-transform: uppercase;
 }
 
 /* ------------------------------------------------------------------ */

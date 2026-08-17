@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { agentRuntimeEnv, LifecycleEvent, Agent, AgentVersion } from "@/lib/agentProxy";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // GET /api/agents/[agentId] — proxies the runtime's tenant-scoped agent
 // detail (agent + versions + tamper-evident lifecycle events). Demo
@@ -23,6 +24,8 @@ const DEMO_EVENTS: LifecycleEvent[] = [
 ];
 
 export async function GET(_: Request, { params }: { params: Promise<{ agentId: string }> }) {
+  const denied = await requireConsolePermission("agents-read");
+  if (denied) return denied;
   const { agentId } = await params;
   const { runtimeUrl, apiKey } = agentRuntimeEnv();
 

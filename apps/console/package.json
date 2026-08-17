@@ -7,19 +7,24 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "jose": "^5.9.6",
+    "lucide-react": "^0.468.0",
     "next": "16.3.0",
+    "next-auth": "^5.0.0-beta.32",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "lucide-react": "^0.468.0",
-    "jose": "^5.9.6"
+    "recharts": "^2.15.4",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   }
 }

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { runtimeUserToken } from "@/lib/auth";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // Proxies the runtime's read-only Audit API (GET /v1/audit and
 // /v1/audit/verify) using a server-side API key, so the key never reaches
@@ -30,14 +32,19 @@ const DEMO_ENTRIES: AuditEntry[] = [
 ];
 
 export async function GET() {
+  const denied = await requireConsolePermission("audit-verify");
+  if (denied) return denied;
   const runtimeUrl = process.env.QUERY_RUNTIME_URL ?? "";
   const apiKey = process.env.GROUNDWORK_API_KEY ?? "";
 
   if (runtimeUrl && apiKey) {
     try {
+      const headers: Record<string, string> = { "X-Groundwork-API-Key": apiKey };
+      const idToken = await runtimeUserToken();
+      if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
       const [listRes, verifyRes] = await Promise.all([
-        fetch(`${runtimeUrl}/v1/audit?limit=25`, { headers: { "X-Groundwork-API-Key": apiKey }, cache: "no-store" }),
-        fetch(`${runtimeUrl}/v1/audit/verify`, { headers: { "X-Groundwork-API-Key": apiKey }, cache: "no-store" }),
+        fetch(`${runtimeUrl}/v1/audit?limit=25`, { headers, cache: "no-store" }),
+        fetch(`${runtimeUrl}/v1/audit/verify`, { headers, cache: "no-store" }),
       ]);
       if (listRes.ok) {
         const list = await listRes.json();

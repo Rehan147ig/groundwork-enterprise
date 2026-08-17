@@ -1,7 +1,6 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { Sidebar } from "../Sidebar";
 import { PERSONAS, personaById } from "@/lib/personas";
 import { AccessDecision, QueryResponse, isShadowMode } from "@/lib/contracts";
 
@@ -66,7 +65,6 @@ export default function DemoConsolePage() {
 
   return (
     <div className="shell">
-      <Sidebar />
       <main className="main">
         <div className="page-head">
           <div>

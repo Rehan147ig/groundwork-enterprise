@@ -1,12 +1,16 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { auth } from "@/lib/auth";
+import { Sidebar } from "./Sidebar";
+import { Providers } from "./Providers";
 
 export const metadata: Metadata = {
   title: "Groundwork Console",
   description: "AI runtime control and security telemetry for regulated enterprise AI.",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await auth();
   return (
     <html lang="en">
       <head>
@@ -17,7 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <Sidebar />
+        <Providers session={session}>{children}</Providers>
+      </body>
     </html>
   );
 }

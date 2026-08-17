@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mintConsoleAssertion } from "@/lib/jwt";
+import { runtimeUserToken } from "@/lib/auth";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // Break-glass operator access (Phase 8.4) — the console surface for
 // /v1/security/break-glass/grants.
@@ -11,9 +13,11 @@ import { mintConsoleAssertion } from "@/lib/jwt";
 //
 // Security posture — deliberately NO demo fallback:
 //   - reads return the real grants list, or fail with a clear error
-//   - mutations require a signed operator identity (mintConsoleAssertion)
-//     exactly like /api/query: there is no demo-mode plain-user_id path
-//     for emergency access
+//   - mutations require a verified operator identity: with an OIDC
+//     session the IdP id_token is forwarded as Authorization: Bearer
+//     (the runtime JWKS-verifies it); otherwise a short-lived
+//     console-admin assertion (mintConsoleAssertion) is used. There is
+//     no demo-mode plain-user_id path for emergency access
 // Fail-closed by design: this surface refuses to fabricate data the way
 // the read-heavy governance views do, because a fake "grant" or silent
 // 503 could mislead an operator during an actual incident.
@@ -32,6 +36,8 @@ function requireKey(): NextResponse | null {
 }
 
 export async function GET() {
+  const denied = await requireConsolePermission("break-glass");
+  if (denied) return denied;
   const missing = requireKey();
   if (missing) return missing;
   let res: Response;
@@ -57,6 +63,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireConsolePermission("break-glass");
+  if (denied) return denied;
   const missing = requireKey();
   if (missing) return missing;
 
@@ -76,12 +84,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const token = await mintConsoleAssertion("console-operator");
-  if (!token) {
+  const idToken = await runtimeUserToken();
+  let operatorToken: string | null = null;
+  if (idToken) {
+    operatorToken = idToken; // runtime JWKS-verifies the IdP id_token itself
+  } else {
+    operatorToken = await mintConsoleAssertion("console-operator");
+  }
+  if (!operatorToken) {
     return NextResponse.json(
       {
         error:
-          "Opening a break-glass grant requires a signed operator identity. Set GROUNDWORK_JWT_RS_PRIVATE_KEY (production) or GROUNDWORK_JWT_HS_SECRET (local).",
+          "Opening a break-glass grant requires a verified operator identity. Configure OIDC_ISSUER/OIDC_CLIENT_ID/OIDC_CLIENT_SECRET (enterprise) or GROUNDWORK_JWT_RS_PRIVATE_KEY / GROUNDWORK_JWT_HS_SECRET (assertion minting).",
       },
       { status: 503 },
     );
@@ -94,7 +108,9 @@ export async function POST(request: NextRequest) {
       headers: {
         "Content-Type": "application/json",
         "X-Groundwork-API-Key": API_KEY,
-        "X-Groundwork-User-Assertion": token,
+        ...(idToken
+          ? { Authorization: `Bearer ${idToken}` }
+          : { "X-Groundwork-User-Assertion": operatorToken }),
       },
       body: JSON.stringify({ reason, duration_minutes: durationMinutes }),
       cache: "no-store",

@@ -43,6 +43,8 @@ import {
   govFetch,
 } from "@/lib/governanceProxy";
 import { agentError } from "@/lib/agentProxy";
+import { requireConsolePermission } from "@/lib/consoleAuth";
+import type { ConsolePermission } from "@/lib/rbac";
 
 // Catch-all proxy for the runtime's delegated-authority surface
 // (/v1/governance/*). Reads (GET tools / grants / runs / details /
@@ -59,14 +61,33 @@ function notFound(path: string[]): NextResponse {
   return agentError(404, `Unknown governance route: /v1/governance/${path.join("/")}`);
 }
 
+// Read-permission mapping: framework evidence exports and audit surfaces
+// keep their dedicated auditor permissions; everything else under
+// /v1/governance is read-only governance evidence (auditor+).
+function readPermissionFor(path: string[]): ConsolePermission {
+  if (path[0] === "exports") return "compliance-exports";
+  if (path[0] === "audit") return "audit-verify";
+  return "governance-read";
+}
+
 export async function GET(request: NextRequest, { params }: GovRouteParams) {
+  const denied = await requireConsolePermission(readPermissionFor((await params).path));
+  if (denied) return denied;
   const { path } = await params;
   const p = path.join("/");
   const res = await govFetch("GET", path);
   const data = await res.json().catch(() => ({}));
 
   if (res.status === 503 || res.status === 502) {
-    // Runtime unreachable or governance not wired: demo fallback.
+    // Runtime unreachable or governance not wired: demo fallback is gated
+    // by GROUNDWORK_DEMO_MODE=true exactly like the agents/audit/leak
+    // surfaces — production never fabricates governance data.
+    if (process.env.GROUNDWORK_DEMO_MODE !== "true") {
+      return NextResponse.json(
+        { source: "error", error: `governance_unavailable (${p.replace(/\//g, "_")})` },
+        { status: 503 },
+      );
+    }
     if (p === "tools") {
       const body: GovToolsResp = { source: "demo", tools: DEMO_TOOLS, count: DEMO_TOOLS.length };
       return NextResponse.json(body);
@@ -181,6 +202,8 @@ export async function GET(request: NextRequest, { params }: GovRouteParams) {
 }
 
 export async function POST(request: NextRequest, { params }: GovRouteParams) {
+  const denied = await requireConsolePermission("governance-manage");
+  if (denied) return denied;
   const { path } = await params;
   const body = await request.json().catch(() => null);
   const res = await govFetch("POST", path, body ?? {});

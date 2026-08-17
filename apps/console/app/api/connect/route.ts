@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { runtimeUserToken } from "@/lib/auth";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // The Connect step. In V1 the actual org sync is performed by the runtime's
 // github-connector (PAT -> teams/repos -> SpiceDB relationships). This route
@@ -20,6 +22,8 @@ const ACME_GRAPH = {
 };
 
 export async function POST(request: NextRequest) {
+  const denied = await requireConsolePermission("connect");
+  if (denied) return denied;
   const body = await request.json().catch(() => ({}));
   const pat = typeof body?.pat === "string" ? body.pat.trim() : "";
   // Validate shape only; never echo or store the token.
@@ -36,9 +40,15 @@ export async function POST(request: NextRequest) {
   const apiKey = process.env.GROUNDWORK_API_KEY ?? "";
   if (runtimeUrl && apiKey) {
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-Groundwork-API-Key": apiKey,
+      };
+      const idToken = await runtimeUserToken();
+      if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
       const res = await fetch(`${runtimeUrl}/v1/connect/github`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Groundwork-API-Key": apiKey },
+        headers,
         body: JSON.stringify({}),
         cache: "no-store",
       });

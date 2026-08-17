@@ -5,6 +5,7 @@ import {
   agentHeaders,
   agentRuntimeEnv,
 } from "@/lib/agentProxy";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // Proxies the runtime's Agent Registry (GET /v1/agents list, POST
 // /v1/agents create) using a server-side API key + console-admin
@@ -95,6 +96,8 @@ const DEMO_AGENTS: Agent[] = [
 ];
 
 export async function GET(request: NextRequest) {
+  const denied = await requireConsolePermission("agents-read");
+  if (denied) return denied;
   const { runtimeUrl, apiKey } = agentRuntimeEnv();
   const state = request.nextUrl.searchParams.get("state") ?? "";
   if (runtimeUrl && apiKey) {
@@ -134,6 +137,8 @@ function demoData<T>(data: T): NextResponse {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireConsolePermission("agents-manage");
+  if (denied) return denied;
   const { runtimeUrl, apiKey, secret } = agentRuntimeEnv();
   const payload = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!payload || typeof payload.name !== "string" || !payload.name.trim()) {

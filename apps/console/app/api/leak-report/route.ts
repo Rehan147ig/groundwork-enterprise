@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { sanitizeRichText } from "@/lib/sanitize";
+import { runtimeUserToken } from "@/lib/auth";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // Leak Report. The analysis lives in the runtime: GET /v1/leak-report
 // (audit scope) runs github.Connector.Snapshot -> leakreport.Analyze
@@ -27,13 +29,18 @@ function sanitizedFindings(findings: Finding[]): Finding[] {
 }
 
 export async function GET() {
+  const denied = await requireConsolePermission("leak-report");
+  if (denied) return denied;
   const runtimeUrl = process.env.QUERY_RUNTIME_URL ?? "";
   const apiKey = process.env.GROUNDWORK_API_KEY ?? "";
   if (runtimeUrl && apiKey) {
     try {
+      const headers: Record<string, string> = { "X-Groundwork-API-Key": apiKey };
+      const idToken = await runtimeUserToken();
+      if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
       // Live: runtime runs github.Connector.Snapshot -> leakreport.Analyze.
       const res = await fetch(`${runtimeUrl}/v1/leak-report`, {
-        headers: { "X-Groundwork-API-Key": apiKey },
+        headers,
         cache: "no-store",
       });
       if (res.ok) {

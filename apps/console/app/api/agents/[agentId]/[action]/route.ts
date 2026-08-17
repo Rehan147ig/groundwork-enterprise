@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { agentError, agentHeaders, agentRuntimeEnv } from "@/lib/agentProxy";
+import { requireConsolePermission } from "@/lib/consoleAuth";
 
 // POST /api/agents/[agentId]/[action] — proxies the registry mutation
 // endpoints (versions | activate | suspend | revoke | retire). Only the
@@ -13,6 +14,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ agentId: string; action: string }> },
 ) {
+  const denied = await requireConsolePermission("agents-manage");
+  if (denied) return denied;
   const { agentId, action } = await params;
   if (!ACTIONS.includes(action as (typeof ACTIONS)[number])) {
     return agentError(400, `Unknown action "${action}".`);

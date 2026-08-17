@@ -1,7 +1,6 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { Sidebar } from "../Sidebar";
 import { QueryResponse } from "@/lib/contracts";
 
 const scopes = [
@@ -76,7 +75,6 @@ export default function LiveAclTestPage() {
 
   return (
     <div className="shell">
-      <Sidebar />
       <main className="main">
         <div className="page-head">
           <div>
