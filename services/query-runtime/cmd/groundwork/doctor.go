@@ -29,6 +29,7 @@ import (
 	"groundwork/query-runtime/internal/governance"
 	"groundwork/query-runtime/internal/keyring"
 	"groundwork/query-runtime/internal/relationship/spicedb"
+	"groundwork/query-runtime/internal/runtime"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -125,6 +126,8 @@ func exitOKOrCheck(failures int) int {
 func runChecks(opts doctorOptions) []checkResult {
 	results := make([]checkResult, 0, 12)
 	results = append(results, checkDeployment(opts))
+	results = append(results, checkBootstrapAPIKey())
+	results = append(results, checkProductionGates())
 	results = append(results, checkTenancy())
 	results = append(results, checkIdentityKeys())
 	results = append(results, checkDelegationAuthority())
@@ -290,6 +293,50 @@ func checkDeployment(opts doctorOptions) checkResult {
 	return checkResult{Name: "deployment", Status: "FAIL", Detail: strings.Join(details, "; ")}
 }
 
+func checkBootstrapAPIKey() checkResult {
+	key := os.Getenv("BOOTSTRAP_API_KEY")
+	if key == "" {
+		key = runtime.DefaultBootstrapAPIKey
+	}
+	if err := runtime.ValidateBootstrapAPIKey(key, os.Getenv("GROUNDWORK_ENV")); err != nil {
+		return checkResult{Name: "bootstrap-api-key", Status: "FAIL", Detail: err.Error()}
+	}
+	return checkResult{Name: "bootstrap-api-key", Status: "PASS", Detail: "bootstrap key is not the public default"}
+}
+
+// checkProductionGates evaluates the consolidated G1-G8 fail-closed
+// startup requirements. Local/dev mode passes without checks; a non-local
+// environment reports every failing gate.
+func checkProductionGates() checkResult {
+	cfg := runtime.ProductionConfig{
+		Env:                    os.Getenv("GROUNDWORK_ENV"),
+		BootstrapKey:           os.Getenv("BOOTSTRAP_API_KEY"),
+		BootstrapTenant:        os.Getenv("BOOTSTRAP_TENANT_ID"),
+		AuditSalt:              os.Getenv("IMMUTABLE_AUDIT_SALT"),
+		OIDCIssuer:             os.Getenv("GROUNDWORK_OIDC_ISSUER"),
+		JWTSecret:              os.Getenv("GROUNDWORK_JWT_HS_SECRET"),
+		JWTPrivateKey:          os.Getenv("GROUNDWORK_JWT_RS_PRIVATE_KEY"),
+		JWTPrivateKeyFile:      os.Getenv("GROUNDWORK_JWT_RS_PRIVATE_KEY_FILE"),
+		AllowMemoryAPIKeys:     os.Getenv("ALLOW_MEMORY_API_KEYS") == "true",
+		SpiceDBPlaintext:       os.Getenv("SPICEDB_INSECURE_PLAINTEXT") == "true",
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		FirewallMode:           os.Getenv("GW_FIREWALL_MODE"),
+		FirewallExplicitOptOut: os.Getenv("GW_FIREWALL_OPT_OUT") == "true",
+	}
+	gates := runtime.ValidateProductionGates(cfg)
+	if len(gates) == 0 {
+		if runtime.IsLocalEnv(cfg.Env) {
+			return checkResult{Name: "production-gates", Status: "PASS", Detail: "local mode — production gates deferred"}
+		}
+		return checkResult{Name: "production-gates", Status: "PASS", Detail: "all production gates satisfied"}
+	}
+	details := make([]string, 0, len(gates))
+	for _, g := range gates {
+		details = append(details, g.Code+": "+g.Detail)
+	}
+	return checkResult{Name: "production-gates", Status: "FAIL", Detail: strings.Join(details, "; ")}
+}
+
 func checkTenancy() checkResult {
 	raw := os.Getenv("GROUNDWORK_TENANT_REGIONS")
 	if raw == "" {
@@ -369,6 +416,7 @@ var schemaTables = []string{
 	"external_nonces", "transfer_policies", "consent_records",
 	"external_budget_policies", "trust_events",
 	"tenants", "tenant_events",
+	"api_keys",
 }
 
 func missingSchemaTables(ctx context.Context, db *sql.DB) ([]string, error) {

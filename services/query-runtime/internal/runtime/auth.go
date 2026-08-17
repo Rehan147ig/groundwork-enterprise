@@ -276,37 +276,22 @@ func (p *PostgresAPIKeyResolver) Resolve(ctx context.Context, rawKey string) (Te
 }
 
 func (p *PostgresAPIKeyResolver) bootstrap(ctx context.Context, bootstrapKey string, tenant TenantContext) error {
-	if _, err := p.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS api_keys (
-			id BIGSERIAL PRIMARY KEY,
-			key_hash TEXT UNIQUE NOT NULL,
-			key_prefix TEXT,
-			tenant_id TEXT NOT NULL,
-			region TEXT NOT NULL,
-			name TEXT NOT NULL DEFAULT 'default',
-			scopes TEXT NOT NULL DEFAULT 'query',
-			rate_limit_rpm INTEGER NOT NULL DEFAULT 60,
-			active BOOLEAN NOT NULL DEFAULT TRUE,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			last_used_at TIMESTAMPTZ,
-			revoked_at TIMESTAMPTZ,
-			expires_at TIMESTAMPTZ
+	// The api_keys schema is owned by migrations/035_create_api_keys. The
+	// runtime inserts-only when the table exists so a hardened database
+	// that revokes DDL from the app user still starts, and so audit
+	// migration history is the single source of schema truth. A missing
+	// table is a clear signal to run migrations, not an implicit CREATE.
+	var exists bool
+	if err := p.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public' AND table_name = 'api_keys'
 		)
-	`); err != nil {
+	`).Scan(&exists); err != nil {
 		return err
 	}
-	for _, statement := range []string{
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_prefix TEXT`,
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT 'query'`,
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rate_limit_rpm INTEGER NOT NULL DEFAULT 60`,
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`,
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`,
-		`CREATE INDEX IF NOT EXISTS api_keys_key_prefix_idx ON api_keys (key_prefix)`,
-		`CREATE INDEX IF NOT EXISTS api_keys_tenant_active_idx ON api_keys (tenant_id, active)`,
-	} {
-		if _, err := p.pool.Exec(ctx, statement); err != nil {
-			return err
-		}
+	if !exists {
+		return errors.New("api_keys table missing — run migrations (migrations/035_create_api_keys.up.sql) before starting the runtime")
 	}
 	if bootstrapKey == "" || tenant.TenantID == "" || tenant.Region == "" {
 		return nil

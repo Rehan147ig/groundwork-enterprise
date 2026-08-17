@@ -45,6 +45,12 @@ import (
 )
 
 func main() {
+	groundworkEnv := os.Getenv("GROUNDWORK_ENV")
+	bootstrapAPIKey := env("BOOTSTRAP_API_KEY", runtime.DefaultBootstrapAPIKey)
+	if err := runtime.ValidateBootstrapAPIKey(bootstrapAPIKey, groundworkEnv); err != nil {
+		log.Fatalf("startup refused: %v", err)
+	}
+
 	cfg := runtime.Config{
 		Addr:                  env("QUERY_RUNTIME_ADDR", ":8080"),
 		QueryTimeout:          envDuration("QUERY_TIMEOUT_MS", 15*time.Second),
@@ -54,7 +60,7 @@ func main() {
 		CircuitFailureLimit:   envInt("QDRANT_CIRCUIT_FAILURE_LIMIT", 3),
 		CircuitHalfOpenLimit:  envInt("QDRANT_CIRCUIT_HALF_OPEN_LIMIT", 1),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		BootstrapAPIKey:       env("BOOTSTRAP_API_KEY", "gw_local_acme_key"),
+		BootstrapAPIKey:       bootstrapAPIKey,
 		BootstrapTenantID:     env("BOOTSTRAP_TENANT_ID", "acme"),
 		BootstrapTenantRegion: env("BOOTSTRAP_TENANT_REGION", "US"),
 		IDKThreshold:          envFloat("IDK_THRESHOLD", 0.70),
@@ -235,7 +241,7 @@ func main() {
 	// verify). Predictable values are refused at startup; empty keeps the
 	// original v1 formula for local/dev and pre-salt deployments.
 	auditSalt := os.Getenv("IMMUTABLE_AUDIT_SALT")
-	if err := validateAuditSalt(auditSalt); err != nil {
+	if err := runtime.ValidateAuditSalt(auditSalt); err != nil {
 		log.Fatal(err)
 	}
 	if auditDB != nil && auditSalt == "" {
@@ -1077,39 +1083,16 @@ func buildAuditWriter(databaseURL string, backend runtime.Backend, timeout time.
 // would try first when recomputing digests after tampering (L-004). Any
 // non-empty salt on this list is a misconfiguration; the runtime refuses
 // to start rather than run with a salt that provides no protection.
-var predictableAuditSalts = map[string]bool{
-	"change-me":              true,
-	"change_me":              true,
-	"changeme":               true,
-	"default":                true,
-	"default-salt":           true,
-	"default_salt":           true,
-	"default-salt-change-me": true,
-	"default_salt_change_me": true,
-	"secret":                 true,
-	"password":               true,
-	"salt":                   true,
-	"groundwork":             true,
-	"groundwork-salt":        true,
-	"groundwork_audit_salt":  true,
-}
+//
+// Deprecated: use runtime.ValidateAuditSalt / runtime.PredictableAuditSalts.
+var predictableAuditSalts = runtime.PredictableAuditSalts
 
 // validateAuditSalt enforces the L-004 guard: predictable non-empty
-// IMMUTABLE_AUDIT_SALT values are refused at startup. An empty salt is
-// allowed — it reproduces the original digest formula, which every local
-// and pre-salt deployment relies on — but production operators are
-// advised (in the startup log and in fly.toml) to set a strong one.
+// IMMUTABLE_AUDIT_SALT values are refused at startup.
+//
+// Deprecated: use runtime.ValidateAuditSalt.
 func validateAuditSalt(salt string) error {
-	if salt == "" {
-		return nil
-	}
-	if predictableAuditSalts[strings.ToLower(strings.TrimSpace(salt))] {
-		return fmt.Errorf("IMMUTABLE_AUDIT_SALT is set to a predictable value %q — refusing to run with a salt that provides no tamper-evidence protection. Generate a strong random value and set it once; never change it afterwards (changing it invalidates the chain). See docs/threat-model.md L-004.", salt)
-	}
-	if len(salt) < 16 {
-		return fmt.Errorf("IMMUTABLE_AUDIT_SALT must be at least 16 characters (got %d)", len(salt))
-	}
-	return nil
+	return runtime.ValidateAuditSalt(salt)
 }
 
 // buildPrincipalResolver constructs the canonical principal resolver: the Postgres-backed

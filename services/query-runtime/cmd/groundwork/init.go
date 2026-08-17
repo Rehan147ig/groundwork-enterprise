@@ -36,6 +36,14 @@ GROUNDWORK_ENV=local
 # short-lived console-admin JWTs — set it (>= 32 chars, high entropy).
 GROUNDWORK_JWT_HS_SECRET=%[1]s
 
+# --- Bootstrap API key + audit salt ------------------------------------
+# BOOTSTRAP_API_KEY is the first admin key minted into the Postgres
+# api_keys table on startup. Set it, and never use the repo-published
+# demo value outside GROUNDWORK_ENV=local. The audit salt is bound into
+# every immutable digest — set it once, never rotate it.
+BOOTSTRAP_API_KEY=%[5]s
+IMMUTABLE_AUDIT_SALT=%[6]s
+
 # --- Delegation signing (RS256 preferred) ----------------------------
 # A generated key pair is written to delegation-rs256.pem(.pub) and
 # wired via the FILE variable. Alternatively set
@@ -130,6 +138,15 @@ func scaffold(opts initOptions, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	bootstrapKey, err := secret()
+	if err != nil {
+		return err
+	}
+	bootstrapKey = "gw_live_" + bootstrapKey
+	auditSalt, err := secret()
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(opts.dir, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", opts.dir, err)
@@ -153,7 +170,7 @@ func scaffold(opts initOptions, stdout io.Writer) error {
 	}
 
 	files := map[string]string{
-		filepath.Join(opts.dir, "groundwork.env"):           fmt.Sprintf(envTemplate, jwtSecret, filepath.ToSlash(absPriv), delegationSecret, webhookSecret),
+		filepath.Join(opts.dir, "groundwork.env"):           fmt.Sprintf(envTemplate, jwtSecret, filepath.ToSlash(absPriv), delegationSecret, webhookSecret, bootstrapKey, auditSalt),
 		filepath.Join(opts.dir, "policy.json"):              string(policy) + "\n",
 		filepath.Join(opts.dir, "README.md"):                renderReadme(opts.template, tpl.Description),
 		filepath.Join(opts.dir, "delegation-rs256.pem"):     keyPair.private,
@@ -176,6 +193,7 @@ func scaffold(opts initOptions, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "  policy.json              starter policy (template %q, validated)\n", opts.template)
 	fmt.Fprintf(stdout, "\nnext steps:\n")
 	fmt.Fprintf(stdout, "  1. edit %s: set DATABASE_URL, SPICEDB_ENDPOINT, GROUNDWORK_ENV=production, GROUNDWORK_DEPLOYMENT_REGION\n", filepath.Join(opts.dir, "groundwork.env"))
+	fmt.Fprintf(stdout, "     (BOOTSTRAP_API_KEY and IMMUTABLE_AUDIT_SALT were generated for you — never commit them)\n")
 	fmt.Fprintf(stdout, "  2. groundwork doctor --env-file %s\n", filepath.Join(opts.dir, "groundwork.env"))
 	fmt.Fprintf(stdout, "  3. register the agent and apply policy.json via the governance API (POST /v1/agents, /v1/governance/tools, /v1/governance/grants, /v1/governance/budgets)\n")
 	return nil
