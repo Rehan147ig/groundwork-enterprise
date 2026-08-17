@@ -71,6 +71,7 @@ tmp/
 session-summary.md
 console.log('HEALTHZ_ERR'
 services/query-runtime/NUL)*
+infra/.env.quickstart
 
 # Test / coverage artifacts
 htmlcov/

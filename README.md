@@ -187,6 +187,7 @@ Copy `.env.example` to `.env` and set the values for your environment. Key varia
 - **Live permission checks** — SpiceDB at query time; the [SpiceDB migration](docs/spicedb-migration.md) documents the full cutover from the legacy store.
 - **Secrets scanning** — every PR is scanned by [secret-scan](.github/workflows/secret-scan.yml).
 - **Responsible disclosure** — see [SECURITY.md](SECURITY.md).
+- **Production hardening** — fail-closed startup gates (G1–G8), supply-chain integrity, and the authorization test matrix are tracked in [production-hardening-plan.md](docs/production-hardening-plan.md). The operator install path is [quickstart-production.md](docs/quickstart-production.md); the honest scope and shared-responsibility model is [security-trust-package.md](docs/security-trust-package.md).
 
 ## Testing
 
@@ -203,6 +204,10 @@ CI runs all of the above plus migration checks and secret scanning on every push
 
 - [Architecture](docs/architecture.md)
 - [Governance & security](docs/governance.md)
+- [Production hardening plan](docs/production-hardening-plan.md)
+- [Production quickstart](docs/quickstart-production.md)
+- [Security & trust package](docs/security-trust-package.md)
+- [Authorization test matrix](docs/authorization-test-matrix.md)
 - [Identity resolution](docs/identity-resolution.md)
 - [Connectors](docs/connectors.md) · [Microsoft Graph connector](docs/microsoft-graph-connector.md)
 - [Observability](docs/observability.md) · [Load testing & canary](docs/load-testing-and-canary.md)

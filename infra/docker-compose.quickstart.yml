@@ -66,13 +66,13 @@ services:
     environment:
       QUERY_RUNTIME_ADDR: ":8080"
       DATABASE_URL: postgres://groundwork:groundwork@postgres:5432/groundwork?sslmode=disable
-      BOOTSTRAP_API_KEY: gw_local_acme_key
+      BOOTSTRAP_API_KEY: ${BOOTSTRAP_API_KEY:-gw_local_acme_key}
       BOOTSTRAP_TENANT_ID: acme
       BOOTSTRAP_TENANT_REGION: US
       SPICEDB_ENDPOINT: dns:///spicedb:50051
       SPICEDB_TOKEN: groundwork-local
       SPICEDB_INSECURE_PLAINTEXT: "true"
-      IMMUTABLE_AUDIT_SALT: quickstart_demo_salt_37840ed_valid
+      IMMUTABLE_AUDIT_SALT: ${IMMUTABLE_AUDIT_SALT:-quickstart_demo_salt_37840ed_valid}
       ALLOW_DEMO_IDENTITY: "true"
       GROUNDWORK_ENV: local
     ports:
@@ -97,7 +97,7 @@ services:
       dockerfile: apps/console/Dockerfile
     environment:
       QUERY_RUNTIME_URL: http://query-runtime:8080
-      GROUNDWORK_API_KEY: gw_local_acme_key
+      GROUNDWORK_API_KEY: ${BOOTSTRAP_API_KEY:-gw_local_acme_key}
       GROUNDWORK_DEMO_MODE: "true"
       # Enterprise auth is OFF in the quickstart (no OIDC credentials):
       # the local secret is a fixed dev value so NextAuth's session JWT
@@ -120,7 +120,7 @@ services:
     command: ["/bin/sh", "/seed.sh"]
     environment:
       QUICKSTART_RUNTIME_URL: http://query-runtime:8080
-      QUICKSTART_API_KEY: gw_local_acme_key
+      QUICKSTART_API_KEY: ${BOOTSTRAP_API_KEY:-gw_local_acme_key}
     depends_on:
       query-runtime:
         condition: service_healthy
