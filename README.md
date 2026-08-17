@@ -5,7 +5,7 @@
 > **30 seconds to understand:** Every AI application you run is one retrieval away from leaking the data it should never reach. Groundwork is a runtime enforcement layer that sits between your AI apps/agents and private data — and it is the *only* path their data can travel. Every query is checked against **live permissions** (revocation is immediate, no caching), scrubbed by a **context firewall** (PII redaction, prompt-injection blocking, provenance watermarks), and written to an **immutable, verifiable audit chain**. If any enforcement layer fails, the request fails **closed** — zero chunks reach the model, and the denial is itself audited. There is no open fallback. If it isn't permitted right now, it is not retrievable right now — period.
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
-![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)
@@ -72,13 +72,15 @@ flowchart LR
 
 | Component | Technology | Responsibility |
 |---|---|---|
-| `query-runtime` | Go 1.23 | REST gateway + MCP server, ACL evaluation, circuit breakers, audit, identity |
-| `ingestion` | Python 3.11 | Semantic chunking, embeddings (FastEmbed), atomic dual-write to Qdrant + Elasticsearch |
-| `console` | Next.js 16 | CISO dashboard, live ACL test screen, audit explorer |
+| `query-runtime` | Go 1.25 | REST gateway + MCP server, ACL evaluation, circuit breakers, immutable audit chain, identity |
+| `ingestion` | Python 3.11 | Semantic chunking, embeddings (FastEmbed), atomic dual-write to Qdrant + Elasticsearch, SpiceDB relationship writes |
+| `console` | Next.js 16 | CISO dashboard, live ACL test screen, audit explorer, break-glass |
 | `spicedb` | authzed/spicedb | Live permission graph (Google Zanzibar-style ReBAC) |
 | `qdrant` | Qdrant | Vector search with int8 scalar quantization |
 | `elasticsearch` | Elasticsearch 8 | Lexical search (reserved for the compliance search module) |
-| `postgres` | PostgreSQL | Tenant metadata, audit traces, immutable query log |
+| `postgres` | PostgreSQL | Tenant metadata, audit traces, immutable query log, governance ledger |
+
+Beyond retrieval enforcement, the runtime ships a **governed agent plane**: delegated authority (`/v1/governance/delegations`), run lifecycle + evaluate/dispatch (`/v1/governance/runs`), a connector gateway with evidence-chained invocations, break-glass emergency grants with approval flow, and usage metering that fails closed on quota. Every mutation across those surfaces is recorded in the same hash-chained evidence store as query decisions.
 
 ## Monorepo Structure
 
@@ -95,9 +97,11 @@ groundwork/
 │   ├── python/               Shared Python types
 │   └── contracts/            Shared JSON API contracts / schemas
 ├── services/
-│   ├── query-runtime/        Go runtime: gateway, MCP server, ACL, audit, identity
+│   ├── query-runtime/        Go runtime: gateway, MCP server, ACL, audit, governance, connectors
 │   ├── ingestion/            Python ingestion: chunker, embedder, dual-index writer
 │   └── msgraph-connector/    Go Microsoft Graph directory connector (pilot)
+├── sdks/                     Official SDKs: TypeScript, Python, Go, Java, Rust, C#
+├── terraform-provider-groundwork/  Terraform provider for runtime resources
 ├── examples/
 │   ├── github-demo/          GitHub org permission demo (seeder + compose)
 │   └── bank-demo/            Bank folder-hierarchy demo (seeder + compose)
@@ -136,7 +140,7 @@ Your first query was permission-checked against live ACLs, firewall-scrubbed, an
 
 ## Full Development Setup
 
-Prerequisites: Docker + Docker Compose, Go 1.23+, Python 3.11+, Node 18.17+.
+Prerequisites: Docker + Docker Compose, Go 1.25+, Python 3.11+, Node 18.17+.
 
 ```bash
 # 1. Infrastructure (Postgres, SpiceDB, Qdrant, Elasticsearch)
@@ -175,7 +179,9 @@ Copy `.env.example` to `.env` and set the values for your environment. Key varia
 | `SPICEDB_TOKEN` | SpiceDB preshared key |
 | `QDRANT_URL` | Qdrant HTTP endpoint |
 | `ELASTICSEARCH_URL` | Elasticsearch HTTP endpoint |
-| `GROUNDWORK_API_KEY` | Bootstrap API key for the runtime |
+| `BOOTSTRAP_API_KEY` | Bootstrap API key seeded into the runtime on startup |
+| `BOOTSTRAP_API_KEY_RATE_LIMIT_RPM` | Per-minute rate limit for the bootstrap key (default 600) |
+| `RELATIONSHIP_TIMEOUT_MS` | ACL phase budget per query (default 60ms; raise for large batches) |
 | `GROUNDWORK_JWT_HS_SECRET` / `GROUNDWORK_OIDC_ISSUER` | Identity material (HMAC or OIDC) |
 
 **Never commit real secrets.** `.env*` files are git-ignored.
@@ -193,10 +199,12 @@ Copy `.env.example` to `.env` and set the values for your environment. Key varia
 
 | Layer | Command |
 |---|---|
-| Go runtime (40 packages) | `cd services/query-runtime && go vet ./... && go test ./...` |
+| Go runtime (all packages) | `cd services/query-runtime && go vet ./... && go test ./...` |
 | Python ingestion | `cd services/ingestion && python -m unittest discover tests` |
 | TypeScript workspaces | `npx turbo run typecheck` (or `npm run typecheck`) |
 | Compose infrastructure | `docker compose -f infra/docker-compose.yml config --quiet` |
+
+The `cmd/loadtest` binary in `services/query-runtime` drives a full benchmark against a running stack (query, delegation, run dispatch, connector dispatch, evidence), with seed/setup modes that populate Qdrant and SpiceDB — see [Load testing & canary](docs/load-testing-and-canary.md).
 
 CI runs all of the above plus migration checks and secret scanning on every push.
 
