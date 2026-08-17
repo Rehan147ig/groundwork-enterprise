@@ -146,3 +146,58 @@ func classifyDelta(items []GraphDeltaItem) (deleted, changed []string) {
 	}
 	return deleted, changed
 }
+
+// snapshotGrantees extracts the read-granting users/groups from a
+// permission list as stable snapshot entries (user id or group id).
+func snapshotGrantees(perms []GraphPermission) []SnapshotGrantee {
+	var out []SnapshotGrantee
+	for _, p := range perms {
+		if !grantsRead(p.Roles) {
+			continue
+		}
+		switch {
+		case p.Grantee.GroupID != "":
+			out = append(out, SnapshotGrantee{ID: p.Grantee.GroupID})
+		case p.Grantee.UserID != "":
+			out = append(out, SnapshotGrantee{Type: "user", ID: p.Grantee.UserID})
+		}
+	}
+	return out
+}
+
+// containsGrantee reports whether g appears in grantees (same type + id).
+func containsGrantee(grantees []SnapshotGrantee, g SnapshotGrantee) bool {
+	for _, x := range grantees {
+		if x.Type == g.Type && x.ID == g.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotRevokeChange maps a snapshot grantee that lost access to the
+// precise aclsync revoke event (mirrors revokeChange for delta diffs).
+func snapshotRevokeChange(item GraphDriveItem, g SnapshotGrantee, userByID map[string]string) (aclsync.PermissionChange, bool) {
+	objectPrefix := "document:"
+	changeType := aclsync.ChangeRevokeDocumentViewer
+	if item.IsFolder {
+		objectPrefix = "folder:"
+		changeType = aclsync.ChangeRevokeFolderViewer
+	}
+	if g.Type != "user" {
+		return aclsync.PermissionChange{
+			Type:    changeType,
+			Subject: "group:" + groupKey(g.ID) + "#member",
+			Object:  objectPrefix + item.ID,
+		}, true
+	}
+	key := userByID[g.ID]
+	if key == "" {
+		key = g.ID // fall back to the raw object id (unresolvable user)
+	}
+	return aclsync.PermissionChange{
+		Type:    changeType,
+		Subject: "user:" + key,
+		Object:  objectPrefix + item.ID,
+	}, true
+}

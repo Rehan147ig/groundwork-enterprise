@@ -14,9 +14,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"groundwork/query-runtime/internal/secretref"
 )
 
 // Config holds Microsoft Graph connection settings (from MS_GRAPH_* env).
@@ -24,6 +27,8 @@ type Config struct {
 	TenantID         string // Entra tenant (auth)
 	ClientID         string
 	ClientSecret     string
+	ClientSecretRef  string    // keyring:// or secret-manager ref; preferred over ClientSecret in production
+	CredentialExpiry time.Time // resolved credential expiry (CredentialTTL source); zero = none configured
 	SiteID           string
 	DriveID          string
 	AuthorityHost    string        // default https://login.microsoftonline.com
@@ -144,12 +149,60 @@ func NewHTTPGraphClient(cfg Config) *httpGraphClient {
 	}
 }
 
+// SetSecretResolver injects the credential resolver used for
+// ClientSecretRef. In production this is the keyring-backed resolver;
+// local/dev deployments may inject the env resolver. WITHOUT an
+// injected resolver, a ClientSecretRef fails closed on first use —
+// there is no silent fallback.
+func (g *httpGraphClient) SetSecretResolver(r SecretResolver) {
+	if g.tokens != nil {
+		g.tokens.secrets = r
+	}
+}
+
 type tokenSource struct {
-	cfg    Config
-	http   *http.Client
-	mu     sync.Mutex
-	token  string
-	expiry time.Time
+	cfg     Config
+	http    *http.Client
+	secrets SecretResolver
+	mu      sync.Mutex
+	token   string
+	expiry  time.Time
+}
+
+// SecretResolver resolves a credential reference to key material.
+// Production implementations read from keyring/secret managers (see
+// internal/keyring.NewSecretResolver); the env resolver exists for
+// local/dev only and the production startup gate forbids it.
+type SecretResolver interface {
+	// Resolve returns the secret for ref (e.g. keyring://connector/msgraph).
+	// Unresolvable refs return an error — never empty/zero material.
+	Resolve(ctx context.Context, ref string) (string, error)
+}
+
+// EnvSecretResolver resolves env://<VARNAME> references by environment
+// lookup — the local/dev fallback. It deliberately does NOT accept
+// keyring:// references (those require the keyring-backed resolver);
+// the production gate forbids env:// entirely.
+type EnvSecretResolver struct{ lookup func(string) string }
+
+// NewEnvSecretResolver builds an EnvSecretResolver over os.Getenv.
+func NewEnvSecretResolver() *EnvSecretResolver {
+	return &EnvSecretResolver{lookup: os.Getenv}
+}
+
+// Resolve implements SecretResolver.
+func (r *EnvSecretResolver) Resolve(_ context.Context, ref string) (string, error) {
+	parsed, err := secretref.Parse(ref)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrAuthFailed, err)
+	}
+	if !parsed.IsEnv() {
+		return "", fmt.Errorf("%w: %q is not an env:// reference (keyring:// references require the keyring-backed resolver)", ErrAuthFailed, ref)
+	}
+	if v := strings.TrimSpace(r.lookup(parsed.ID)); v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("%w: no secret for ref %s (set %s or use a keyring reference)", ErrAuthFailed, ref, parsed.ID)
 }
 
 // get returns a cached token or fetches a new one via the client-credentials flow.
@@ -159,10 +212,21 @@ func (t *tokenSource) get(ctx context.Context) (string, error) {
 	if t.token != "" && time.Now().Before(t.expiry.Add(-time.Minute)) {
 		return t.token, nil
 	}
+	secret := t.cfg.ClientSecret
+	if t.cfg.ClientSecretRef != "" {
+		if t.secrets == nil {
+			return "", fmt.Errorf("%w: ClientSecretRef %q is set but no secret resolver is injected (fail closed — wire the keyring resolver in production)", ErrAuthFailed, t.cfg.ClientSecretRef)
+		}
+		resolved, err := t.secrets.Resolve(ctx, t.cfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+		secret = resolved
+	}
 	endpoint := fmt.Sprintf("%s/%s/oauth2/v2.0/token", t.cfg.AuthorityHost, t.cfg.TenantID)
 	form := url.Values{}
 	form.Set("client_id", t.cfg.ClientID)
-	form.Set("client_secret", t.cfg.ClientSecret)
+	form.Set("client_secret", secret)
 	form.Set("grant_type", "client_credentials")
 	form.Set("scope", "https://graph.microsoft.com/.default")
 

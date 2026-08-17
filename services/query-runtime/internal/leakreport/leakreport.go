@@ -77,6 +77,58 @@ func (r Report) CountBySeverity() map[Severity]int {
 	return out
 }
 
+// DriftReport is the delta between two historical Report snapshots:
+// findings that appeared since the previous run (NewFindings —
+// introduced exposure) and findings that disappeared (ResolvedFindings
+// — remediated exposure). A finding is matched across snapshots by its
+// stable identity (kind + document + group), so the same exposure
+// changing severity is still the "same" finding.
+type DriftReport struct {
+	TenantID         string
+	NewFindings      []Finding
+	ResolvedFindings []Finding
+}
+
+func findingKey(f Finding) string {
+	return string(f.Kind) + "\x00" + f.DocumentID + "\x00" + f.Group
+}
+
+// Diff compares two reports and reports the exposure delta. Findings
+// are matched multiset-style by stable identity: adding a finding to
+// the current report surfaces it under NewFindings, removing one
+// surfaces it under ResolvedFindings, and identical findings cancel.
+func Diff(previous, current Report) DriftReport {
+	drift := DriftReport{TenantID: current.TenantID}
+	prevRemaining := make(map[string]int, len(previous.Findings))
+	for _, f := range previous.Findings {
+		prevRemaining[findingKey(f)]++
+	}
+	currRemaining := make(map[string]int, len(current.Findings))
+	for _, f := range current.Findings {
+		currRemaining[findingKey(f)]++
+	}
+
+	drift.NewFindings = make([]Finding, 0, len(current.Findings))
+	for _, f := range current.Findings {
+		k := findingKey(f)
+		if prevRemaining[k] > 0 {
+			prevRemaining[k]--
+			continue
+		}
+		drift.NewFindings = append(drift.NewFindings, f)
+	}
+	drift.ResolvedFindings = make([]Finding, 0, len(previous.Findings))
+	for _, f := range previous.Findings {
+		k := findingKey(f)
+		if currRemaining[k] > 0 {
+			currRemaining[k]--
+			continue
+		}
+		drift.ResolvedFindings = append(drift.ResolvedFindings, f)
+	}
+	return drift
+}
+
 // Analyze inspects ps and returns a Report. owners maps document ID ->
 // rightful owning group; pass nil to skip ownership-based findings
 // (cross-department / excessive-group), in which case only structural

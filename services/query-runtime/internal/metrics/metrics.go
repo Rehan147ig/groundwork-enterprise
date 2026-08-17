@@ -98,6 +98,34 @@ var (
 		[]string{"tenant_id", "sink"},
 	)
 
+	// Connector installation health (Milestone 3). Gauges are refreshed
+	// by the connector health loop; seconds-since values allow alerting
+	// on stale syncs (lag / last-success age) and credential rotation.
+	ConnectorLastSuccessAgeSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "groundwork_connector_last_success_age_seconds", Help: "Seconds since the connector's last successful sync"},
+		[]string{"tenant_id", "provider"},
+	)
+	ConnectorSyncLagSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "groundwork_connector_sync_lag_seconds", Help: "Observed sync lag (source change age) in seconds"},
+		[]string{"tenant_id", "provider"},
+	)
+	ConnectorDriftItems = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "groundwork_connector_drift_items", Help: "Permission-drift items from the last drift check"},
+		[]string{"tenant_id", "provider"},
+	)
+	ConnectorCredentialExpirySeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "groundwork_connector_credential_expiry_seconds", Help: "Seconds until the connector credential expires (0 = no expiry configured)"},
+		[]string{"tenant_id", "provider"},
+	)
+	ConnectorState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "groundwork_connector_state", Help: "Connector installation state: 1 active, 0 degraded/failed"},
+		[]string{"tenant_id", "provider"},
+	)
+	ConnectorCredentialPlaintextEnv = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "groundwork_connector_credential_plaintext_env_total", Help: "Connector credential material supplied via plaintext env vars (production violation; keyring:// required)"},
+		[]string{"tenant_id", "provider"},
+	)
+
 	registerOnce sync.Once
 )
 
@@ -137,6 +165,12 @@ func RegisterAll() {
 			WebhookEventsApplied,
 			WebhookSignatureFailures,
 			WebhookLatency,
+			ConnectorLastSuccessAgeSeconds,
+			ConnectorSyncLagSeconds,
+			ConnectorDriftItems,
+			ConnectorCredentialExpirySeconds,
+			ConnectorState,
+			ConnectorCredentialPlaintextEnv,
 		)
 	})
 }
@@ -215,4 +249,27 @@ func RecordSpiceDBCircuitTrip() {
 // during dual-write. sink identifies the secondary.
 func RecordACLSyncConflict(tenantID, sink string) {
 	ACLSyncConflictsTotal.WithLabelValues(tenantID, sink).Inc()
+}
+
+// SetInstallationHealth refreshes the connector installation gauges. age is
+// the last-success age in seconds, lag the observed sync lag in seconds,
+// drift the last drift-check item count, credentialTTL seconds until
+// credential expiry (0 = none), and active the installation state.
+func SetInstallationHealth(tenantID, provider string, ageSeconds, lagSeconds, drift, credentialTTL float64, active bool) {
+	ConnectorLastSuccessAgeSeconds.WithLabelValues(tenantID, provider).Set(ageSeconds)
+	ConnectorSyncLagSeconds.WithLabelValues(tenantID, provider).Set(lagSeconds)
+	ConnectorDriftItems.WithLabelValues(tenantID, provider).Set(drift)
+	ConnectorCredentialExpirySeconds.WithLabelValues(tenantID, provider).Set(credentialTTL)
+	state := 0.0
+	if active {
+		state = 1.0
+	}
+	ConnectorState.WithLabelValues(tenantID, provider).Set(state)
+}
+
+// RecordConnectorCredentialPlaintextEnv flags that connector credential
+// material reached the process via a plaintext env var instead of a
+// keyring:// reference (production violation; surfaced in doctor).
+func RecordConnectorCredentialPlaintextEnv(tenantID, provider string) {
+	ConnectorCredentialPlaintextEnv.WithLabelValues(tenantID, provider).Inc()
 }

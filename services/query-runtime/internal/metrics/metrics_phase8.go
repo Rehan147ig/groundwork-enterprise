@@ -114,6 +114,18 @@ var (
 		[]string{"tenant_id"},
 	)
 
+	// Notification delivery (Milestone 5): failed security notifications
+	// must be visible — an emergency access event that succeeds without
+	// an acknowledged delivery alert is a silent security gap.
+	NotificationFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "groundwork_notification_failures_total", Help: "Security notification deliveries that failed after the retry budget (alerting surface for silent delivery gaps)"},
+		[]string{"tenant_id", "channel"},
+	)
+	NotificationSignaturesRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "groundwork_notification_signatures_rejected_total", Help: "Interactive action requests rejected on signature/replay verification"},
+		[]string{"reason"},
+	)
+
 	registerPhase8Once sync.Once
 )
 

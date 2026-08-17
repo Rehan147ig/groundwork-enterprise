@@ -1,0 +1,706 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Groundwork Query Runtime API",
+    "version": "1.0.0",
+    "description": "Zero-Trust AI Context Firewall for agentic AI. Groundwork sits between AI applications and private data sources, enforcing live permissions, data residency, and audit requirements on every query _before_ any data reaches a model.\n\nThe public surface documented here covers:\n\n- **`POST /v1/query`** - permission-checked, firewall-redacted retrieval with per-chunk provenance (watermarks) and an immutable trace.\n- **`GET /v1/leak-report`** - connector-backed scan of external indexes for documents that should have been restricted.\n- **`POST /v1/security/break-glass/grants`** and **`.../{id}/revoke`** - time-bounded, reason-mandatory emergency admin access that mints a short-lived admin-scoped API key. Every lifecycle transition is hash-chained evidence.\n- **`GET /v1/audit/verify`** - recompute the tenant's append-only hash chain and prove that no historical row was altered or deleted.\n- **`GET /v1/usage`** - metered consumption per metric against the tenant's configured limits.\n\n## Authentication\n\nEvery endpoint requires an API key sent as `X-Groundwork-API-Key`. Keys are scoped; an endpoint is callable only by a key that carries its required scope (`query`, `audit`, `usage`, `break_glass`, and `admin`, which satisfies any scope). All paths additionally accept `Authorization: Bearer <key>`.\n\nRequest bodies never carry tenant/region/identity: the tenant is resolved from the API key and identity from signed headers. A key that fails resolution or has expired returns `401`; a key without the endpoint's scope returns `403 insufficient_scope`.\n\n## Fail-closed behavior\n\nIf the authorizer, vector backend, or engine is unavailable, `POST /v1/query` returns **zero chunks** (or a 5xx) and writes a `FAIL_CLOSED` decision to the immutable audit log. There is no fallback to an open state.",
+    "license": { "name": "Apache-2.0", "url": "https://www.apache.org/licenses/LICENSE-2.0" }
+  },
+  "servers": [
+    { "url": "http://localhost:8080", "description": "Local quickstart (query-runtime, default QUERY_RUNTIME_ADDR :8080)" },
+    { "url": "https://{host}", "variables": { "host": { "default": "gw.example.com", "description": "Managed Groundwork host" } }, "description": "Managed deployment" }
+  ],
+  "tags": [
+    { "name": "Query", "description": "Zero-trust retrieval surface for AI applications and agents" },
+    { "name": "Security", "description": "Report and governance surfaces (leak report, break-glass operator access)" },
+    { "name": "Evidence", "description": "Immutable audit verification" },
+    { "name": "Operations", "description": "Usage metering" }
+  ],
+  "paths": {
+    "/v1/query": {
+      "post": {
+        "tags": ["Query"],
+        "summary": "Run a permission-checked, firewall-filtered query for a verified user",
+        "operationId": "query",
+        "description": "Retrieves candidate chunks from the vector/keyword backends, evaluates **every chunk against live permissions** (SpiceDB in production), applies the zero-trust context firewall (PII redaction, indirect prompt-injection blocking, provenance watermarking), and returns an answer with citations and an immutable audit trace.\n\n- Requires an API key with scope `query`.\n- Requires `user_id` in the body and a verified identity: either an `X-Groundwork-User-Assertion` JWT (HMAC or OIDC) or an `X-Groundwork-Delegation-Token` minted for an agent run (with matching `run_id`). Without identity the request fails closed.\n- Fail-closed: authorizer/backend/engine unavailability returns zero chunks and records `FAIL_CLOSED` in the audit log.\n- Idempotency: the server stamps `X-Groundwork-Correlation-Id` on the audit row; pass it to make the trace id deterministic.",
+        "parameters": [
+          {
+            "name": "X-Groundwork-Correlation-Id",
+            "in": "header",
+            "required": false,
+            "description": "Client-supplied correlation id; stamped onto the audit row so the client-visible trace id matches the server record.",
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "X-Groundwork-User-Assertion",
+            "in": "header",
+            "required": false,
+            "description": "Signed identity assertion (JWT, HS256 HMAC or OIDC) binding the caller to `user_id`. Verified before any retrieval; invalid or missing identity fails closed.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "X-Groundwork-Delegation-Token",
+            "in": "header",
+            "required": false,
+            "description": "Agent delegation token for run-scoped queries. When present, `run_id` must match the run the token was minted for.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/QueryRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answer with permission-checked citations and an immutable audit trace.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/QueryResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body (`invalid_json`) or missing `question`/`user_id`.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing (`missing_api_key`), invalid (`invalid_api_key`), expired (`api_key_expired`), or identity assertion invalid (`invalid_identity_assertion`, `identity_verifier_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `query` (`insufficient_scope`) or the user identity could not be resolved (`identity_unresolved`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (`rate_limit_exceeded`); retry after backoff.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine unavailable (`engine_unavailable`) - fail closed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/leak-report": {
+      "get": {
+        "tags": ["Security"],
+        "summary": "Scan connected external indexes for missing-scope documents",
+        "operationId": "leakReport",
+        "description": "Read-only compliance scan (e.g. over the connected GitHub org's indexed repos) that reports documents which should have been restricted - files pushed before an org was onboarded, excluded paths that got indexed, or permissions that were tightened after indexing.\n\n- Requires an API key with scope `audit`.\n- Returns `503 connector_unavailable` when no connector service is wired.",
+        "responses": {
+          "200": {
+            "description": "Leak report scan completed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LeakResult" }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing, invalid, or expired.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `audit` (`insufficient_scope`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Connector service not wired (`connector_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security/break-glass/grants": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "Open a time-bounded emergency admin grant",
+        "operationId": "openBreakGlassGrant",
+        "description": "Opens an active break-glass grant that mints a short-lived, admin-scoped API key, and appends hash-chained `opened` evidence to the tenant's write-once event chain. The raw minted key is returned **once** in this response and never persisted - an operator who loses it must open a new grant.\n\n- Requires an API key with scope `break_glass` **and** a verified operator identity (`X-Groundwork-User-Assertion` JWT).\n- `reason` is mandatory; `duration_minutes` is capped by `BREAK_GLASS_MAX_MINUTES` (default 60, min 1).",
+        "parameters": [
+          {
+            "name": "X-Groundwork-User-Assertion",
+            "in": "header",
+            "required": true,
+            "description": "Verified operator identity assertion (JWT). The operator principal is bound to the grant and every lifecycle event.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "security": [
+          {
+            "apiKey": [],
+            "identityAssertion": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OpenBreakGlassRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Grant opened; `key` is the one-time, short-lived admin API key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BreakGlassOpenResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body (`invalid_json`), missing reason (`reason_required`), or invalid duration (`break_glass_open_failed`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "No tenant context (`missing_tenant_context`) or API key invalid/expired.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `break_glass` (`insufficient_scope`) or no verified operator identity (`verified_identity_required`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Break-glass service not wired (`break_glass_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security/break-glass/grants/{id}/revoke": {
+      "post": {
+        "tags": ["Security"],
+        "summary": "Revoke an active break-glass grant",
+        "operationId": "revokeBreakGlassGrant",
+        "description": "Terminates an active grant early - immediately revoking its minted API key - and appends hash-chained `revoked` evidence with the mandatory reason.\n\n- Requires an API key with scope `break_glass` and a verified operator identity.\n- Grants past `expires_at` are lazily flipped to `expired`; revoking an inactive grant returns `409 break_glass_grant_not_active`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Break-glass grant id.",
+            "schema": { "type": "string", "example": "grant-1" }
+          },
+          {
+            "name": "X-Groundwork-User-Assertion",
+            "in": "header",
+            "required": true,
+            "description": "Verified operator identity assertion (JWT); recorded as the revocation actor.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "security": [
+          {
+            "apiKey": [],
+            "identityAssertion": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RevokeBreakGlassRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Grant revoked with hash-chained evidence.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/BreakGlassGrant" }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body (`invalid_json`), missing grant id (`grant_id_required`), or missing reason (`reason_required`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "No tenant context (`missing_tenant_context`) or API key invalid/expired.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `break_glass` (`insufficient_scope`) or no verified operator identity (`verified_identity_required`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "404": {
+            "description": "No grant with this id for the tenant (`break_glass_grant_not_found`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "409": {
+            "description": "Grant exists but is no longer active (`break_glass_grant_not_active`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Break-glass service not wired (`break_glass_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit/verify": {
+      "get": {
+        "tags": ["Evidence"],
+        "summary": "Verify the tenant's immutable audit hash chain",
+        "operationId": "auditVerify",
+        "description": "Recomputes the append-only SHA-256 hash chain for the calling tenant's audit log. Every row digests its predecessor (ordered by the immutable `seq` identity to stay stable under concurrent writes), so a rewritten, deleted, or reordered row fails verification with a per-row problem entry.\n\n- Requires an API key with scope `audit`.\n- Refuses chains above the server maximum with `413` and `error chain_too_large` - a signal to archive before re-verifying. (Not: an over-large chain is never walked, so downtime is bounded.)\n- Returns `503 audit_unavailable` when no read-side audit store is wired.",
+        "responses": {
+          "200": {
+            "description": "Chain verification result; `problems` is empty when every entry is intact.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AuditVerifyResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing, invalid, or expired.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `audit` (`insufficient_scope`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "413": {
+            "description": "Chain exceeds the server's verify limit (`chain_too_large`); archive before re-verifying.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ChainTooLargeResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "Audit read-side unavailable (`audit_unavailable`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "tags": ["Operations"],
+        "summary": "Snapshot metered usage for the calling tenant",
+        "operationId": "getUsage",
+        "description": "Returns current counts per metric against configured limits for the current month. `remaining` is `-1` when a metric is unlimited; when a limited metric would be exceeded, the governing endpoint fails closed before performing the work.\n\n- Requires an API key with scope `usage`.",
+        "responses": {
+          "200": {
+            "description": "Usage snapshot for the calling tenant.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UsageSnapshot" }
+              }
+            }
+          },
+          "401": {
+            "description": "API key missing, invalid, or expired.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks scope `usage` (`insufficient_scope`).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Groundwork-API-Key",
+        "description": "Tenant API key. Scoped; `admin` satisfies any scope. Also accepted as `Authorization: Bearer <key>`."
+      },
+      "identityAssertion": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Groundwork-User-Assertion",
+        "description": "Verified end-user identity assertion (JWT, signed via the configured HMAC secret or OIDC issuer). Required by endpoints that must attribute actions to a human operator."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "Error envelope: a stable machine-readable `error` code.",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "example": "insufficient_scope" }
+        }
+      },
+      "QueryRequest": {
+        "type": "object",
+        "description": "Zero-trust query. Identity comes from the signed header, never the body.",
+        "required": ["user_id", "question"],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "End-user principal id; must match the verified identity assertion. ACLs are evaluated against this principal at query time - no caching.",
+            "example": "alice@corp.com"
+          },
+          "question": {
+            "type": "string",
+            "description": "Natural-language query. Scanned by the context firewall for indirect prompt injection before retrieval.",
+            "example": "What shipped in the last sprint?"
+          },
+          "source_scopes": {
+            "type": "array",
+            "description": "Optional filter of per-document required scopes to restrict retrieval to.",
+            "items": { "type": "string" },
+            "example": ["engineering"]
+          },
+          "idk_threshold": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Below this confidence, the engine answers 'I don't know' instead of guessing. Server default applies when omitted.",
+            "example": 0.35
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Agent run id; required and verified when authenticating with an `X-Groundwork-Delegation-Token`.",
+            "example": "run-8f2a"
+          }
+        }
+      },
+      "QueryResponse": {
+        "type": "object",
+        "required": ["answer", "confidence", "citations", "trace"],
+        "properties": {
+          "answer": { "type": "string", "description": "Generated answer grounded in the permitted chunks (or an I-Don't-Know response)." },
+          "confidence": { "type": "number", "format": "double", "minimum": 0, "maximum": 1 },
+          "citations": {
+            "type": "array",
+            "description": "Permission-checked chunks that grounded the answer, ranked by score.",
+            "items": { "$ref": "#/components/schemas/Citation" }
+          },
+          "trace": { "$ref": "#/components/schemas/RuntimeTrace" }
+        }
+      },
+      "Citation": {
+        "type": "object",
+        "required": ["document_id", "chunk_id", "chunk_hash", "page", "offset", "text", "score", "freshness_score"],
+        "properties": {
+          "document_id": { "type": "string", "description": "Stable document id." },
+          "chunk_id": { "type": "string" },
+          "chunk_hash": {
+            "type": "string",
+            "description": "SHA-256 digest of the chunk text - the per-chunk provenance fingerprint an auditor can re-derive."
+          },
+          "page": { "type": "integer", "description": "Page number (0-based)." },
+          "offset": { "type": "integer", "description": "Character offset within the page." },
+          "text": { "type": "string", "description": "Chunk text, post-firewall: PII redacted, prompt-injection spans removed in block mode." },
+          "score": { "type": "number", "format": "double" },
+          "freshness_score": { "type": "number", "format": "double" },
+          "watermark": {
+            "type": "string",
+            "description": "Context-firewall provenance signature over (tenant, chunk id, text), HMAC'd with the firewall key. Verify with firewall.VerifyWatermark; empty when no firewall key is set.",
+            "example": "gw1.hmac.v1..."
+          }
+        }
+      },
+      "RuntimeTrace": {
+        "type": "object",
+        "description": "Immutable evidence record of one query decision, mirrored verbatim into the audit log.",
+        "required": ["trace_id", "tenant_id", "user_id", "region", "started_at", "latency_ms", "vector_candidates", "keyword_candidates", "blocked_by_acl", "blocked_by_residency", "reranked_candidates", "decision_mode", "access_decisions", "immutable_digest"],
+        "properties": {
+          "trace_id": { "type": "string", "description": "Correlation id; matches X-Groundwork-Correlation-Id when supplied." },
+          "tenant_id": { "type": "string" },
+          "user_id": { "type": "string" },
+          "region": { "type": "string", "description": "Data residency region." },
+          "started_at": { "type": "string", "format": "date-time" },
+          "latency_ms": { "type": "integer" },
+          "vector_candidates": { "type": "integer" },
+          "keyword_candidates": { "type": "integer" },
+          "blocked_by_acl": { "type": "integer", "description": "Chunks removed by the live permission check (SpiceDB in production)." },
+          "blocked_by_residency": { "type": "integer", "description": "Chunks removed by residency/region policy." },
+          "reranked_candidates": { "type": "integer" },
+          "decision_mode": {
+            "type": "string",
+            "enum": ["enforce", "shadow", "fail_closed"],
+            "description": "enforce: ACL blocked chunks are dropped. shadow: they are counted but delivered (shadow deployment). fail_closed: backend failure - zero chunks."
+          },
+          "shadow_mode": { "type": "boolean", "description": "True when in shadow (would-block) mode for ACL decisions." },
+          "would_block_by_acl": { "type": "integer" },
+          "failure_stage": { "type": "string", "description": "Where a fail-closed path stopped (e.g. authorizer_backend, engine)." },
+          "error_code": { "type": "string" },
+          "error_message": { "type": "string" },
+          "access_decisions": {
+            "type": "array",
+            "description": "Per-chunk allow/deny verdicts with reasons - the audit granularity for every candidate.",
+            "items": { "$ref": "#/components/schemas/AccessDecision" }
+          },
+          "immutable_digest": {
+            "type": "string",
+            "description": "SHA-256 over the trace record; rooted into the append-only audit hash chain."
+          },
+          "firewall_redactions": { "type": "integer", "description": "PII spans redacted by the zero-trust context firewall." },
+          "firewall_injection_hits": { "type": "integer", "description": "Indirect prompt-injection spans detected." },
+          "firewall_blocked_chunks": { "type": "integer", "description": "Chunks excluded from context in block mode." },
+          "firewall_watermarked": { "type": "integer", "description": "Chunks signed with a provenance watermark." },
+          "policy_l1_decisions": { "type": "integer", "description": "Decisions resolved by in-process rules/cache." },
+          "policy_l2_fallbacks": { "type": "integer", "description": "Decisions escalated to the backend policy store." }
+        }
+      },
+      "AccessDecision": {
+        "type": "object",
+        "required": ["chunk_id", "chunk_hash", "document_id", "allowed", "reason", "region", "required_scope"],
+        "properties": {
+          "chunk_id": { "type": "string" },
+          "chunk_hash": { "type": "string" },
+          "document_id": { "type": "string" },
+          "allowed": { "type": "boolean" },
+          "reason": { "type": "string", "example": "principal:bob has no access to scope engineering" },
+          "region": { "type": "string" },
+          "required_scope": { "type": "string" }
+        }
+      },
+      "LeakResult": {
+        "type": "object",
+        "required": ["findings"],
+        "properties": {
+          "findings": {
+            "type": "array",
+            "description": "Documents that should have been restricted but are reachable in an indexed external system.",
+            "items": { "$ref": "#/components/schemas/LeakFinding" }
+          }
+        }
+      },
+      "LeakFinding": {
+        "type": "object",
+        "required": ["kind", "severity", "title", "detail"],
+        "properties": {
+          "kind": { "type": "string", "example": "missing_org_scope" },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"], "example": "high" },
+          "title": { "type": "string", "example": "Pre-onboarding commit visible to everyone" },
+          "detail": { "type": "string" }
+        }
+      },
+      "OpenBreakGlassRequest": {
+        "type": "object",
+        "required": ["reason"],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Mandatory accountable rationale; recorded as hash-chained evidence.",
+            "example": "Prod incident - on-call operator needs temporary admin"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "description": "Time-to-live for the minted admin key. Capped by BREAK_GLASS_MAX_MINUTES (default 60).",
+            "example": 30
+          }
+        }
+      },
+      "BreakGlassOpenResponse": {
+        "type": "object",
+        "description": "201 response. `key` is one-time and never persisted - record it securely.",
+        "required": ["grant", "key"],
+        "properties": {
+          "grant": { "$ref": "#/components/schemas/BreakGlassGrant" },
+          "key": {
+            "type": "string",
+            "description": "Short-lived admin-scoped API key (raw). Shown once; expires with the grant.",
+            "example": "gw_bgk_..."
+          }
+        }
+      },
+      "BreakGlassGrant": {
+        "type": "object",
+        "required": ["id", "tenant_id", "operator_principal_id", "reason", "duration_minutes", "key_id", "key_prefix", "status", "expires_at", "requested_at", "immutable_digest", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "tenant_id": { "type": "string" },
+          "operator_principal_id": { "type": "string", "description": "Verified operator who opened the grant." },
+          "reason": { "type": "string" },
+          "duration_minutes": { "type": "integer" },
+          "key_id": { "type": "integer", "description": "Stable id of the minted API key." },
+          "key_prefix": { "type": "string" },
+          "status": { "type": "string", "enum": ["active", "expired", "revoked"] },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "requested_at": { "type": "string", "format": "date-time" },
+          "revoked_at": { "type": "string", "format": "date-time", "description": "Set when revoked." },
+          "revoked_by": { "type": "string" },
+          "revocation_reason": { "type": "string" },
+          "immutable_digest": { "type": "string", "description": "Tamper-evident digest over every binding field." },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RevokeBreakGlassRequest": {
+        "type": "object",
+        "required": ["reason"],
+        "properties": {
+          "reason": { "type": "string", "minLength": 1, "example": "Incident resolved" }
+        }
+      },
+      "AuditVerifyResponse": {
+        "type": "object",
+        "required": ["verified", "entries_checked"],
+        "properties": {
+          "verified": { "type": "boolean", "description": "True when every entry's digest chain is intact." },
+          "entries_checked": { "type": "integer", "description": "Number of chain entries walked." },
+          "problems": {
+            "type": "array",
+            "description": "Per-entry integrity issues, e.g. broken_link (previous_hash mismatch) or digest_mismatch (row fields rewritten). Present only when the chain is damaged.",
+            "items": { "$ref": "#/components/schemas/ChainProblemPayload" }
+          }
+        }
+      },
+      "ChainProblemPayload": {
+        "type": "object",
+        "required": ["index", "trace_id", "kind", "detail"],
+        "properties": {
+          "index": { "type": "integer", "description": "Row position in the chain." },
+          "trace_id": { "type": "string" },
+          "kind": { "type": "string", "example": "broken_link" },
+          "detail": { "type": "string" }
+        }
+      },
+      "ChainTooLargeResponse": {
+        "type": "object",
+        "description": "413 response from GET /v1/audit/verify when the chain exceeds the server cap.",
+        "required": ["error", "entries_checked", "max_allowed"],
+        "properties": {
+          "error": { "type": "string", "example": "chain_too_large" },
+          "entries_checked": { "type": "integer" },
+          "max_allowed": { "type": "integer", "description": "Server's verification cap; archive before re-verifying." }
+        }
+      },
+      "UsageSnapshot": {
+        "type": "object",
+        "required": ["tenant_id", "period", "usage"],
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "period": { "type": "string", "example": "monthly" },
+          "usage": {
+            "type": "array",
+            "description": "One row per metered metric/period combination.",
+            "items": { "$ref": "#/components/schemas/MetricUsage" }
+          }
+        }
+      },
+      "MetricUsage": {
+        "type": "object",
+        "required": ["metric", "period", "count", "limit", "remaining"],
+        "properties": {
+          "metric": {
+            "type": "string",
+            "description": "Metered metric: agents, runs, decisions, connector_calls, exports, storage_bytes.",
+            "example": "runs"
+          },
+          "period": { "type": "string", "example": "monthly" },
+          "count": { "type": "integer", "description": "Current consumption." },
+          "limit": { "type": "integer", "description": "Configured limit; -1 when unlimited." },
+          "remaining": { "type": "integer", "description": "limit - count; -1 when unlimited." }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ]
+}

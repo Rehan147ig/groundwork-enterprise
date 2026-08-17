@@ -30,6 +30,17 @@ var acmeOwners = map[string]string{
 	"gh:executive-strategy":   "executive-team",
 }
 
+// AcmeOwners returns a copy of the demo ownership map for callers that
+// need the same owner semantics as the live leak-report endpoint (the
+// background scheduler).
+func AcmeOwners() map[string]string {
+	out := make(map[string]string, len(acmeOwners))
+	for k, v := range acmeOwners {
+		out[k] = v
+	}
+	return out
+}
+
 // Service runs the GitHub connector and writes its tuples to the
 // authorization store. The client is github.NewMockClient() for the
 // offline Acme demo, or github.NewHTTPClient(token) against a real org.

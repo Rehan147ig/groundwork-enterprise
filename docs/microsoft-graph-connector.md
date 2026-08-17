@@ -6,9 +6,12 @@ onto the `aclsync` domain model, which the Syncer reconciles into SpiceDB. It im
 `aclsync.Connector` and **feeds SpiceDB only** — it never touches the query engine, auth,
 or identity, and it does not bypass SpiceDB.
 
-> Status: framework + Graph mapping + delta plumbing, **unit-tested with a mocked Graph
-> client** (live Microsoft credentials are required for end-to-end and aren't available in
-> the build sandbox). The OAuth/HTTP path is integration-tested later.
+> Status: **production-grade (Milestone 3)** — real HTTP Graph client with
+> least-privilege OAuth, tenant-bound installation registry, encrypted
+> credential metadata, durable Postgres delta cursor, delta polls that emit
+> concrete revoke events (revocations take effect within one poll interval),
+> connector health metrics, and `groundwork doctor` checks. Tested against a
+> reliable fake Graph HTTP server including a revocation → live deny proof.
 
 ## Azure app registration (required Graph permissions)
 
@@ -33,11 +36,12 @@ only reads source permissions and writes SpiceDB tuples; it never modifies Share
 | `MS_GRAPH_CONNECTOR_ENABLED=true` | explicit enable (refuses to start otherwise) |
 | `MS_GRAPH_TENANT_ID` | Entra tenant id (auth) |
 | `MS_GRAPH_CLIENT_ID` | app registration client id |
-| `MS_GRAPH_CLIENT_SECRET` | app client secret (**inject via secret manager**) |
+| `MS_GRAPH_CLIENT_SECRET_REF` | **keyring:// or secret-manager ref** (production; preferred) |
+| `MS_GRAPH_CLIENT_SECRET` | app client secret (**dev/local fallback only**; production requires the ref) |
 | `MS_GRAPH_SITE_ID` | SharePoint site id |
 | `MS_GRAPH_DRIVE_ID` | SharePoint drive id |
 | `MS_GRAPH_AUTHORITY_HOST` | default `https://login.microsoftonline.com` |
-| `ACL_DELTA_TOKEN_DIR` | optional dir for durable delta tokens (else in-memory) |
+| `DATABASE_URL` | Postgres for the durable delta cursor + installation registry (migration 032) |
 
 It reuses the sync-service envs (`ACL_SYNC_MODE`, `ACL_SYNC_TENANT_ID`,
 `ACL_SYNC_INTERVAL_SECONDS`, `ACL_DRIFT_CHECK_INTERVAL_SECONDS`, `SPICEDB_ENDPOINT`, …) from
@@ -79,11 +83,32 @@ inherited permissions on each item, which are captured as direct viewers too.
 ## Delta / change feed
 
 Uses Graph **drive `delta`** queries to detect new/modified/deleted items. The delta token
-is persisted (in-memory by default, or file-backed via `ACL_DELTA_TOKEN_DIR`; swap a
-DB-backed `DeltaTokenStore` for scale). This milestone wires **detection + durable token
-management + logging**; correctness today comes from the Service's **periodic full
-reconcile**, which delta detection accelerates. Granular revoke-event streaming
-(`revokeChange`) is the documented next step.
+is persisted in Postgres (`connector_installations.delta_cursor`, migration 032) so the
+connector resumes exactly where it left off across restarts. Each poll **differs the
+current item permissions against the last-known snapshot**
+(`msgraph.permission_snapshots`) and emits **concrete `acl-sync` revoke events** — the
+Service applies them to SpiceDB immediately, so a permission revocation in SharePoint
+takes effect within **one poll interval** (the revocation SLO). Deleted items revoke
+every grantee recorded in their snapshot. Correctness is backstopped by the Service's
+periodic full reconcile + drift check.
+
+## Installation registry, credentials, health (Milestone 3)
+
+- **`connector_installations`** (migration 032) is the tenant-bound installation record:
+  status, credential reference, delta cursor, last success, sync lag, drift items,
+  credential expiry. Credential material is **never stored in the registry** — only
+  `keyring://` or secret-manager references, and encrypted metadata sealed with the
+  connector purpose key (`keyring.PurposeConnector`, AES-256-GCM).
+- **Secrets**: production must set `MS_GRAPH_CLIENT_SECRET_REF=keyring://connector/msgraph`
+  (or an approved secret-manager ref). `groundwork doctor` fails when a plaintext
+  `MS_GRAPH_CLIENT_SECRET` is set in production mode.
+- **Health**: every sync updates the installation record; `acl-sync` exposes Prometheus
+  gauges `groundwork_connector_last_success_age_seconds`, `sync_lag_seconds`,
+  `drift_items`, `credential_expiry_seconds`, and `state`. `GET /v1/connectors/status`
+  (query scope) surfaces the same health surface in the console — tenant-scoped, never
+  credential material.
+- **Doctor**: `groundwork doctor` checks the connector's config posture, secret
+  reference, and registry health (`status`, last success age).
 
 ## Safety rules (preserved)
 
@@ -103,7 +128,6 @@ Graph mapping itself is exercised by the unit tests via a fake Graph client.
 
 ## Limitations
 
-- Live OAuth/HTTP path is integration-tested later (no creds in CI/sandbox).
 - One SharePoint site/drive per connector instance (run multiple for multiple sites).
 - Permission read is per-item (one Graph call per file/folder) — fine to start; batch/parallelize for large drives.
 - Deep folder-tree inheritance relies on each file's `parent` folder plus Graph's
@@ -114,8 +138,9 @@ Graph mapping itself is exercised by the unit tests via a fake Graph client.
 
 ## Production security warnings
 
-- **Protect the client secret** — inject via a secret manager / Kubernetes secret, never
-  commit it, rotate regularly. Prefer a certificate over a secret where possible.
+- **Protect the client secret** — resolve it via a secret reference
+  (`MS_GRAPH_CLIENT_SECRET_REF`), never plaintext env in production, rotate regularly.
+  Prefer a certificate over a secret where possible.
 - Grant **least privilege** (read-only Graph scopes above) and scope to the specific
   site/drive.
 - Run the connector as its own workload with no inbound exposure; it only needs outbound
