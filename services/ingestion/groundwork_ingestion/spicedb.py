@@ -17,8 +17,8 @@ class SpiceDBAuthorizer:
     deep readiness provisions and drift-checks it on boot).
 
     Every object and subject ID is tenant-scoped the same way the query-runtime
-    adapter scopes them on the wire: ``escape(tenant) + ":" + escape(id)`` with
-    ``~3A``/``~7E`` escaping, so the first literal colon is always the tenant
+    adapter scopes them on the wire: ``escape(tenant) + "/" + escape(id)`` with
+    ``=XX`` hex escaping, so the first literal ``/`` is always the tenant
     boundary. Writes that land unscoped would be invisible to the runtime's
     tenant-scoped checks.
 
@@ -125,17 +125,22 @@ class SpiceDBAuthorizer:
 
 
 def scope_id(tenant_id: str, raw: str) -> str:
-    """Mirrors the query-runtime adapter's scopeID: escape(tenant) + ":" + escape(id)."""
+    """Mirrors the query-runtime adapter's scopeID: escape(tenant) + "/" + escape(id)."""
     if not tenant_id:
         return escape(raw)
-    return f"{escape(tenant_id)}:{escape(raw)}"
+    return f"{escape(tenant_id)}/{escape(raw)}"
 
 
 def escape(value: str) -> str:
-    """Mirrors relationship.EscapeID: escape "~" and ":" so no colon remains."""
-    if "~" not in value and ":" not in value:
-        return value
-    return "".join("~3A" if ch == ":" else "~7E" if ch == "~" else ch for ch in value)
+    """Mirrors relationship.EscapeID: pass [a-zA-Z0-9_-] through and hex-escape
+    everything else as ``=XX`` (so no ``/``, ``:``, ``~``, or ``=`` remains)."""
+    out = []
+    for ch in value:
+        if ch.isascii() and (ch.isalnum() or ch in "-_"):
+            out.append(ch)
+        else:
+            out.append("".join(f"={b:02X}" for b in ch.encode("utf-8")))
+    return "".join(out)
 
 
 def normalize_relation_part(value: str) -> str:

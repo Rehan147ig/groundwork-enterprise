@@ -27,9 +27,11 @@ services:
       retries: 20
 
   spicedb:
-    # Pin a specific version (e.g. authzed/spicedb:v1.40.0) for fully reproducible CI.
-    image: authzed/spicedb:latest
-    command: serve --grpc-preshared-key groundwork --grpc-no-tls
+    # Pinned: modern SpiceDB serves TLS only when cert/key are provided (the old
+    # --grpc-no-tls / --grpc-ca flags no longer exist); the suite connects with
+    # plaintext via GROUNDWORK_TEST_SPICEDB_INSECURE=true.
+    image: authzed/spicedb:v1.56.0
+    command: serve --grpc-preshared-key groundwork
     ports:
       - "50051:50051" # gRPC API (the tests use the SpiceDB adapter)
 

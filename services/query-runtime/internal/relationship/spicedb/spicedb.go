@@ -6,7 +6,7 @@
 //
 // Tenant isolation: unlike the memory backend, this adapter physically
 // scopes tuples per tenant. Every object and subject ID is composed on
-// the wire as EscapeID(tenantID) + ":" + EscapeID(id) and decomposed on
+// the wire as EscapeID(tenantID) + "/" + EscapeID(id) and decomposed on
 // read, so the same ID in two tenants is two distinct SpiceDB objects.
 // Cross-tenant checks, lists, and deletes are then structurally
 // impossible, which is what the contract suite's TenantIsolation
@@ -20,9 +20,12 @@
 // Options:
 //
 //   - Consistency: SPICEDB_CONSISTENCY selects the read consistency
-//     ("minimize_latency" default, "at_least_as_fresh", "fully_consistent").
+//     ("at_least_as_fresh" default, "minimize_latency", "fully_consistent").
 //     At-least-as-fresh is implemented by tracking the newest ZedToken
-//     observed on any read and pinning subsequent reads to it.
+//     observed on any read or write and pinning subsequent reads to it,
+//     so a check issued right after a write is never served from a stale
+//     snapshot (minimize_latency can deny a grant that landed a
+//     millisecond earlier).
 //   - Circuit breaker: WithCircuitBreaker wraps every permissions call;
 //     when the backend fails repeatedly the adapter short-circuits with
 //     relationship.ErrCircuitOpen instead of hammering a sick backend.
@@ -32,6 +35,9 @@
 //   - Custom CA: WithCA pins the gRPC trust anchor to a supplied PEM
 //     bundle (internal PKI), mutually exclusive with the insecure
 //     plaintext option.
+//   - mTLS client cert: WithClientCert presents a PEM certificate/key
+//     pair to the server (SpiceDB --grpc-ca requires client certs).
+//     Applied together with WithCA for a dedicated internal PKI.
 //   - Deep readiness: Ready is not just the gRPC health check — it also
 //     ensures the authorization model is written and matches the
 //     embedded groundwork.zed (fail closed with ErrModelMissing on
@@ -103,6 +109,8 @@ type options struct {
 	timeout         time.Duration
 	plain           bool
 	caPEM           []byte
+	certPEM         []byte
+	keyPEM          []byte
 	consistencyMode string
 	breaker         *relationship.CircuitBreaker
 	onTrip          func()
@@ -127,11 +135,19 @@ func WithCA(caPEM []byte) Option {
 	return func(o *options) { o.caPEM = caPEM }
 }
 
+// WithClientCert presents a PEM certificate/key pair to the server for
+// mutual TLS. Use together with WithCA so the server's own cert
+// verifies against the same internal CA. Mutually exclusive with
+// WithInsecurePlaintext.
+func WithClientCert(certPEM, keyPEM []byte) Option {
+	return func(o *options) { o.certPEM = certPEM; o.keyPEM = keyPEM }
+}
+
 // WithConsistency selects the read-consistency mode for checks and
-// lists: ConsistencyMinimizeLatency (default),
-// ConsistencyAtLeastAsFresh (token-tracked), or
-// ConsistencyFullyConsistent. An unrecognized mode fails at New (fail
-// closed at construction) rather than silently degrading reads.
+// lists: ConsistencyAtLeastAsFresh (default; token-tracked so reads
+// never lag behind observed writes/reads), ConsistencyMinimizeLatency,
+// or ConsistencyFullyConsistent. An unrecognized mode fails at New
+// (fail closed at construction) rather than silently degrading reads.
 func WithConsistency(mode string) Option {
 	return func(o *options) { o.consistencyMode = mode }
 }
@@ -154,12 +170,15 @@ func WithOnCircuitTrip(fn func()) Option {
 // TLS is the default transport; dev deployments opt out with
 // WithInsecurePlaintext.
 func New(endpoint, token string, opts ...Option) (*Client, error) {
-	o := options{timeout: defaultTimeout}
+	o := options{timeout: defaultTimeout, consistencyMode: ConsistencyAtLeastAsFresh}
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.plain && len(o.caPEM) > 0 {
-		return nil, fmt.Errorf("spicedb: WithInsecurePlaintext and WithCA are mutually exclusive")
+	if o.plain && (len(o.caPEM) > 0 || len(o.certPEM) > 0 || len(o.keyPEM) > 0) {
+		return nil, fmt.Errorf("spicedb: WithInsecurePlaintext is mutually exclusive with TLS options (WithCA / WithClientCert)")
+	}
+	if (len(o.certPEM) > 0) != (len(o.keyPEM) > 0) {
+		return nil, fmt.Errorf("spicedb: WithClientCert requires both the certificate and its key")
 	}
 	switch o.consistencyMode {
 	case "", ConsistencyMinimizeLatency, ConsistencyAtLeastAsFresh, ConsistencyFullyConsistent:
@@ -180,6 +199,13 @@ func New(endpoint, token string, opts ...Option) (*Client, error) {
 				return nil, fmt.Errorf("spicedb: WithCA: no certificates parsed from the provided PEM")
 			}
 			tlsCfg.RootCAs = pool
+		}
+		if len(o.certPEM) > 0 {
+			cert, err := tls.X509KeyPair(o.certPEM, o.keyPEM)
+			if err != nil {
+				return nil, fmt.Errorf("spicedb: WithClientCert: %w", err)
+			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
 		}
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	}
@@ -315,7 +341,10 @@ func checkPermissionName(p string) string {
 }
 
 // Write implements relationship.Store. TOUCH makes writes idempotent;
-// batches are chunked at writeChunkSize.
+// batches are chunked at writeChunkSize. The WrittenAt zed token of
+// every batch is observed so at_least_as_fresh reads pin to at least
+// the newest write — a check right after a write never sees a stale
+// snapshot.
 func (c *Client) Write(ctx context.Context, tenantID string, rels []relationship.Relationship) error {
 	if len(rels) == 0 {
 		return nil
@@ -330,9 +359,11 @@ func (c *Client) Write(ctx context.Context, tenantID string, rels []relationship
 					Relationship: encodeRelationship(tenantID, rel),
 				})
 			}
-			if _, err := c.perms.WriteRelationships(ctx, &v1.WriteRelationshipsRequest{Updates: updates}); err != nil {
+			resp, err := c.perms.WriteRelationships(ctx, &v1.WriteRelationshipsRequest{Updates: updates})
+			if err != nil {
 				return c.classify(err)
 			}
+			c.observeToken(resp.GetWrittenAt().GetToken())
 		}
 		return nil
 	})
@@ -444,9 +475,9 @@ func (c *Client) guard(ctx context.Context, fn func(ctx context.Context) error) 
 }
 
 // consistency returns the read consistency for checks and lists based
-// on the configured mode. at_least_as_fresh is token-tracked: reads pin
-// to the newest zed token observed so far, falling back to
-// minimize_latency until the first read provides one.
+// on the configured mode. at_least_as_fresh (the default) is
+// token-tracked: reads pin to the newest zed token observed so far,
+// falling back to minimize_latency until the first token is known.
 func (c *Client) consistency() *v1.Consistency {
 	switch c.consistencyMode {
 	case ConsistencyAtLeastAsFresh:
@@ -501,20 +532,21 @@ func (c *Client) classify(err error) error {
 }
 
 // scopeID composes tenant + id into the on-wire form
-// EscapeID(tenant) + ":" + EscapeID(id). EscapeID removes colons from
-// both parts, so the first literal colon is the tenant boundary and
-// decomposition is unambiguous even for composite IDs like
+// EscapeID(tenant) + "/" + EscapeID(id). EscapeID hex-escapes "/" and
+// "=" (plus every byte outside [a-zA-Z0-9_-]), so neither part can
+// contain a literal "/" and the first "/" is always the tenant
+// boundary — decomposition is unambiguous even for composite IDs like
 // tool_action "<tool>:<action>".
 func scopeID(tenantID, id string) string {
 	if tenantID == "" {
 		return relationship.EscapeID(id)
 	}
-	return relationship.EscapeID(tenantID) + ":" + relationship.EscapeID(id)
+	return relationship.EscapeID(tenantID) + "/" + relationship.EscapeID(id)
 }
 
 // unscopeID strips the tenant boundary produced by scopeID.
 func unscopeID(scoped string) string {
-	if _, raw, ok := strings.Cut(scoped, ":"); ok {
+	if _, raw, ok := strings.Cut(scoped, "/"); ok {
 		return relationship.UnescapeID(raw)
 	}
 	return relationship.UnescapeID(scoped)

@@ -12,9 +12,10 @@
 //
 //  2. Permissions: write the Acme org's SpiceDB relationships (team
 //     memberships + repo viewer grants) tenant-scoped the same way the
-//     runtime's SpiceDB adapter composes IDs (EscapeID(tenant) + ":" +
-//     EscapeID(id), ":" -> ~3A, "~" -> ~7E). The shape is identical to
-//     what internal/aclsync/github.Connector emits against a live org,
+//     runtime's SpiceDB adapter composes IDs (EscapeID(tenant) + "/" +
+//     EscapeID(id); passes [a-zA-Z0-9_-] through, hex-escapes everything
+//     else as "=XX"). The shape is identical to what
+//     internal/aclsync/github.Connector emits against a live org,
 //     including the deliberate engineering-team -> finance-budget
 //     overexposure the Leak Report flags.
 //
@@ -264,26 +265,36 @@ func buildRelationships(tenantID string) []*v1.Relationship {
 }
 
 // scopeID composes tenant + id the way the runtime adapter does:
-// EscapeID(tenant) + ":" + EscapeID(id).
+// EscapeID(tenant) + "/" + EscapeID(id).
 func scopeID(tenantID, id string) string {
-	return escapeID(tenantID) + ":" + escapeID(id)
+	return escapeID(tenantID) + "/" + escapeID(id)
 }
 
-// escapeID mirrors the adapter's ID escaping ("~" -> ~7E, ":" -> ~3A) so
-// these writes land on the same objects the runtime checks.
+// escapeID mirrors the adapter's ID escaping (pass [a-zA-Z0-9_-] through,
+// hex-escape everything else as "=XX") so these writes land on the same
+// objects the runtime checks.
 func escapeID(id string) string {
 	var b strings.Builder
-	for _, r := range id {
-		switch r {
-		case ':':
-			b.WriteString("~3A")
-		case '~':
-			b.WriteString("~7E")
-		default:
-			b.WriteRune(r)
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if escapeSafeIDByte(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "=%02X", c)
 		}
 	}
 	return b.String()
+}
+
+// escapeSafeIDByte mirrors relationship.escapeSafe.
+func escapeSafeIDByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '-' || c == '_':
+		return true
+	}
+	return false
 }
 
 func subject(tenantID, typ, id, relation string) *v1.SubjectReference {

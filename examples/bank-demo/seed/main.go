@@ -428,28 +428,27 @@ func parseObject(s string) (typ, id string) {
 	return typ, id
 }
 
-// scopeID mirrors the runtime adapter's scopeID: escape(tenant) + ":" + escape(id).
+// scopeID mirrors the runtime adapter's scopeID: escape(tenant) + "/" + escape(id).
 func scopeID(tenant, id string) string {
 	if tenant == "" {
 		return escapeID(id)
 	}
-	return escapeID(tenant) + ":" + escapeID(id)
+	return escapeID(tenant) + "/" + escapeID(id)
 }
 
-// escapeID mirrors relationship.EscapeID: escape "~" and ":" (no colons remain).
+// escapeID mirrors relationship.EscapeID: pass [a-zA-Z0-9_-] through,
+// hex-escape everything else as "=XX" (no "/", ":", "~", or "=" remains).
 func escapeID(s string) string {
-	if !strings.ContainsAny(s, ":~") {
-		return s
-	}
 	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case ':':
-			b.WriteString("~3A")
-		case '~':
-			b.WriteString("~7E")
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			b.WriteByte(c)
+		case c == '-' || c == '_':
+			b.WriteByte(c)
 		default:
-			b.WriteRune(r)
+			fmt.Fprintf(&b, "=%02X", c)
 		}
 	}
 	return b.String()

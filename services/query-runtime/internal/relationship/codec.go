@@ -119,44 +119,58 @@ func ValidateResource(r ResourceRef) error {
 	return nil
 }
 
-// EscapeID converts a raw identifier into a form safe for backends that
-// forbid colons in IDs (SpiceDB). The scheme escapes "~" and ":" so the
-// result contains no colon, is reversible, and stays within SpiceDB's
-// 128-byte identifier limit when the input is short. Unescaped, first-colon-splitting
-// "type:id" tuples do NOT use this — they rely on first-colon splitting.
+// EscapeID converts a raw identifier into a form valid as a SpiceDB
+// object ID. SpiceDB validates object IDs against
+// ^(([a-zA-Z0-9/_|\-=+]{1,})|\*)$ — colons, tildes, dots, and other
+// punctuation are rejected at the server. The scheme passes through the
+// common identifier alphabet [a-zA-Z0-9_-] (UUIDs, kebab/snake case)
+// unchanged and hex-escapes every other byte as "=" + two uppercase hex
+// digits, so the result is reversible, contains only SpiceDB-valid
+// characters, and grows modestly for typical inputs. The tenant
+// separator "/" and the escape marker "=" are also escaped here so the
+// composed scopeID stays unambiguous (see the spicedb adapter).
+// First-colon-splitting "type:id" tuples do NOT use this — they rely on
+// first-colon splitting.
 func EscapeID(id string) string {
-	if !strings.ContainsAny(id, ":~") {
-		return id
-	}
 	var b strings.Builder
-	for _, r := range id {
-		switch r {
-		case ':':
-			b.WriteString("~3A")
-		case '~':
-			b.WriteString("~7E")
-		default:
-			b.WriteRune(r)
+	start := 0
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if escapeSafe(c) {
+			continue
 		}
+		b.WriteString(id[start:i])
+		fmt.Fprintf(&b, "=%02X", c)
+		start = i + 1
 	}
+	b.WriteString(id[start:])
 	return b.String()
 }
 
-// UnescapeID reverses EscapeID.
+// escapeSafe reports whether a byte passes through EscapeID untouched.
+// The set is [a-zA-Z0-9_-]: everything SpiceDB allows that never
+// collides with the "=" escape marker or the "/" tenant separator.
+func escapeSafe(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '-' || c == '_':
+		return true
+	}
+	return false
+}
+
+// UnescapeID reverses EscapeID. A bare "=" (not followed by two hex
+// digits) is copied through defensively; the encoder never emits one.
 func UnescapeID(id string) string {
-	if !strings.Contains(id, "~") {
+	if !strings.Contains(id, "=") {
 		return id
 	}
 	var b strings.Builder
 	for i := 0; i < len(id); {
-		if i+3 <= len(id) && id[i] == '~' {
-			switch id[i+1 : i+3] {
-			case "3A":
-				b.WriteByte(':')
-				i += 3
-				continue
-			case "7E":
-				b.WriteByte('~')
+		if i+3 <= len(id) && id[i] == '=' {
+			if v, ok := hexByte(id[i+1 : i+3]); ok {
+				b.WriteByte(v)
 				i += 3
 				continue
 			}
@@ -165,4 +179,25 @@ func UnescapeID(id string) string {
 		i++
 	}
 	return b.String()
+}
+
+// hexByte decodes two uppercase/lowercase hex digits into one byte.
+func hexByte(s string) (byte, bool) {
+	var v byte
+	for i := 0; i < 2; i++ {
+		c := s[i]
+		var n byte
+		switch {
+		case c >= '0' && c <= '9':
+			n = c - '0'
+		case c >= 'A' && c <= 'F':
+			n = c - 'A' + 10
+		case c >= 'a' && c <= 'f':
+			n = c - 'a' + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | n
+	}
+	return v, true
 }

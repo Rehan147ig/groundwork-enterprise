@@ -64,8 +64,8 @@ definition tool_action {
 | can view folder/document | `viewer` relation + folder inheritance | `view` **permission** (computed; SpiceDB cannot compute relations) |
 | can use tool | `use` relation | `use` relation |
 | can execute tool action | `execute` relation | `execute` relation |
-| identity | `user:<id>` | `user:<tenant>:<escaped-id>` (see below) |
-| groups | `group:<id>#member` | `group:<tenant>:<escaped-id>#member` |
+| identity | `user:<id>` | `user:<tenant>/<escaped-id>` (see below) |
+| groups | `group:<id>#member` | `group:<tenant>/<escaped-id>#member` |
 
 SpiceDB can compute *permissions* from relations but cannot compute
 *relations* from other relations, so folder inheritance lives in the
@@ -78,13 +78,14 @@ the wire.
 
 OpenFGA was a *shared store* (tenant id is not sent on the wire; isolation
 was enforced by caller guards). SpiceDB keeps one namespaced copy per
-tenant: every object/user id is escaped (`EscapeID`) and prefixed
-`<tenant-id>:` (e.g. `user:acme:rehan`, `document:acme:doc-1`). Checks and
+tenant: every object/user id is escaped (`EscapeID`; passes `[a-zA-Z0-9_-]`
+through and hex-escapes everything else as `=XX`) and prefixed
+`<tenant-id>/` (e.g. `user:acme/rehan`, `document:acme/doc-1`). Checks and
 writes are scoped to the tenant id passed by the runtime, and the caller
 guard remains the outer enforcement boundary. The cutover's
 `fga-to-spicedb` tool replicated the full source set under each tenant
 scope (source tuple `user:rehan viewer document:doc-1` became
-`user:acme:rehan viewer document:acme:doc-1`).
+`user:acme/rehan viewer document:acme/doc-1`).
 
 ## Runtime wiring
 

@@ -81,16 +81,39 @@ func TestCodecRejectsMalformed(t *testing.T) {
 }
 
 func TestEscapeIDRoundTrip(t *testing.T) {
-	ids := []string{"plain-id", "tool:action", "a:b:c", "has~tilde", "colon:and~tilde"}
+	ids := []string{
+		"plain-id",
+		"user_alice",
+		"tool:action",
+		"a:b:c",
+		"has~tilde",
+		"colon:and~tilde",
+		"slash/id",
+		"eq=sign",
+		"dots.and spaces",
+		"unicode-é",
+	}
 	for _, in := range ids {
 		escaped := EscapeID(in)
 		for _, r := range escaped {
-			if r == ':' {
-				t.Errorf("EscapeID(%q) = %q still contains a colon", in, escaped)
+			if !isSpiceDBIDChar(r) {
+				t.Errorf("EscapeID(%q) = %q contains %q, invalid in SpiceDB object IDs", in, escaped, r)
 			}
 		}
 		if got := UnescapeID(escaped); got != in {
 			t.Errorf("escape round trip %q: got %q", in, got)
 		}
 	}
+}
+
+// isSpiceDBIDChar matches SpiceDB's object ID charset
+// [a-zA-Z0-9/_|\-=+].
+func isSpiceDBIDChar(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	case r == '/' || r == '_' || r == '|' || r == '\\' || r == '-' || r == '=' || r == '+':
+		return true
+	}
+	return false
 }
