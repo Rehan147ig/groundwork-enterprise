@@ -42,5 +42,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Audit dependencies (pip-audit)
+        # Supply-chain gate: fails on any known vulnerability in the
+        # installed tree. Run `pip-audit` locally to reproduce.
+        run: |
+          pip install pip-audit
+          pip-audit
+
+      - name: Static analysis (bandit)
+        # Security-focused SAST for Python: injection, secrets, unsafe
+        # deserialization, weak crypto. Start at "no high/medium".
+        run: |
+          pip install bandit
+          bandit -r groundwork_ingestion -ll -ii
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

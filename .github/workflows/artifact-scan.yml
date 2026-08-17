@@ -1,0 +1,38 @@
+name: artifact-scan
+
+# Fails when build artifacts or debug scratch files are committed. Binaries
+# can embed build paths and secrets, and stray shell-redirect files (e.g. a
+# pasted `console.log('HEALTHZ_ERR'` that became a file) undercut a security
+# product's review posture. Run on every PR, no path filter, so an artifact
+# introduced anywhere blocks the merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifact-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  artifact-scan:
+    name: artifact-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ban committed build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          matches="$(git ls-files | grep -E '(\.(exe|dll|so|dylib|test|out|tsbuildinfo)$|__pycache__/|(^|/)tmp/|console\.log\()' || true)"
+          if [ -n "$matches" ]; then
+            echo "::error::Committed artifacts or scratch files detected:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "artifact-scan: clean"

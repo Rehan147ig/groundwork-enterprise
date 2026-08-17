@@ -1,0 +1,69 @@
+name: supply-chain
+
+# Generates CycloneDX SBOMs and cosign keyless signatures for the source
+# trees behind each component image, on version tags. This gives customers
+# a verifiable chain from source commit to what they run.
+#
+# The keyless cosign flow uses a short-lived OIDC identity bound to this
+# workflow (id-token: write), so NO long-lived signing key is stored.
+# Container-image signing is wired to the actual image build/push pipeline
+# once that exists in CI; today this workflow signs the SBOMs and documents
+# the same pattern for images.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - context: services/query-runtime
+            name: query-runtime
+          - context: services/ingestion
+            name: ingestion
+          - context: apps/console
+            name: console
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Set up cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Generate SBOM
+        shell: bash
+        run: |
+          syft packages "dir:${{ matrix.context }}" \
+            -o cyclonedx-json \
+            > "groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json"
+
+      - name: Sign SBOM (cosign keyless)
+        shell: bash
+        run: |
+          cosign sign-blob \
+            --yes \
+            "groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json" \
+            --output-signature "groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json.sig" \
+            --output-certificate "groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json.crt"
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: |
+            groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json
+            groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json.sig
+            groundwork-${{ matrix.name }}-${{ github.ref_name }}.sbom.json.crt
